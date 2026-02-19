@@ -5,3 +5,4 @@
 .DS_Store
 *.log
 /~/.local/state/leash/alerts.jsonl
+*.jsonl
