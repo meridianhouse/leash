@@ -1,0 +1,48 @@
+# NovaClaw EDR Configuration
+protected_processes:
+  - openclaw-gateway
+  - node
+  - systemd
+  - sshd
+  - NetworkManager
+  - gnome-shell
+  - claude
+  - codex
+
+# AI tools get behavioral monitoring, not simple whitelisting.
+# They are allowed to: read credentials, spawn shells, access vault
+# They are FLAGGED if: spawned by unusual parent, connecting to suspicious ports,
+# modifying system files, or their parent chain looks hijacked.
+ai_tools:
+  names:
+    - claude
+    - codex
+  legitimate_parents:
+    - node
+    - npm
+    - openclaw-gateway
+    - bash
+    - zsh
+    - sh
+    - systemd
+    - tmux
+    - screen
+  # If an AI tool is spawned by anything NOT in legitimate_parents,
+  # credential access is elevated to RED (possible hijack)
+
+sensitive_paths:
+  - ~/.ssh
+  - ~/.config
+  - ~/.clawdbot/secrets
+  - /etc/shadow
+  - /etc/sudoers
+  - /etc/crontab
+  - /etc/passwd
+
+vault_path: ~/.clawdbot/secrets/vault/
+vault_whitelist:
+  - openclaw
+  - nova
+  - age
+  - claude
+  - codex
