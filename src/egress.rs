@@ -7,10 +7,10 @@ use nu_ansi_term::Color;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
 use tracing::warn;
 
 pub struct EgressMonitor {
@@ -45,12 +45,12 @@ impl EgressMonitor {
 
     pub async fn run(mut self) {
         loop {
-            self.collect_once();
+            self.collect_once().await;
             sleep(Duration::from_millis(self.cfg.monitor_interval_ms)).await;
         }
     }
 
-    fn collect_once(&mut self) {
+    async fn collect_once(&mut self) {
         if self.running_in_container && !self.warned_container_mode {
             self.warned_container_mode = true;
             warn!(
@@ -102,7 +102,7 @@ impl EgressMonitor {
                 };
 
                 let suspicious_reasons = self.suspicious_reasons(&conn, &cmdline);
-                let resolved_host = self.resolve_hostname_cached(&conn.remote_addr);
+                let resolved_host = self.resolve_hostname_cached(&conn.remote_addr).await;
                 let service = self.known_service_name(
                     resolved_host.as_deref(),
                     &conn.remote_addr,
@@ -114,10 +114,17 @@ impl EgressMonitor {
                 let event_type = class.event_type();
                 let class_label = class.paint_label();
                 let suspicious = !suspicious_reasons.is_empty();
+                let connection_context = format!(
+                    "Connection to {}{} on port {}",
+                    conn.remote_addr,
+                    format_hostname_suffix(&resolved_host),
+                    conn.remote_port
+                );
 
                 let narrative = if suspicious {
                     format!(
-                        "Suspicious network connection {}:{} -> {}:{}{} (pid={}) service={} class={} reasons=[{}]",
+                        "{} | Suspicious network connection {}:{} -> {}:{}{} (pid={}) service={} class={} reasons=[{}]",
+                        connection_context,
                         conn.local_addr,
                         conn.local_port,
                         conn.remote_addr,
@@ -130,7 +137,8 @@ impl EgressMonitor {
                     )
                 } else {
                     format!(
-                        "Network connection {}:{} -> {}:{}{} (pid={}) service={} class={}",
+                        "{} | Network connection {}:{} -> {}:{}{} (pid={}) service={} class={}",
+                        connection_context,
                         conn.local_addr,
                         conn.local_port,
                         conn.remote_addr,
@@ -182,12 +190,22 @@ impl EgressMonitor {
         }
     }
 
-    fn resolve_hostname_cached(&mut self, remote_addr: &str) -> Option<String> {
+    async fn resolve_hostname_cached(&mut self, remote_addr: &str) -> Option<String> {
+        if is_rfc1918_ipv4(remote_addr) {
+            return None;
+        }
+
         if let Some(existing) = self.dns_cache.get(remote_addr) {
             return existing.clone();
         }
 
-        let resolved = reverse_dns_lookup(remote_addr);
+        let resolved = timeout(
+            Duration::from_secs(2),
+            reverse_dns_lookup_with_tokio_validation(remote_addr),
+        )
+        .await
+        .ok()
+        .flatten();
         self.dns_cache
             .insert(remote_addr.to_string(), resolved.clone());
         resolved
@@ -483,6 +501,33 @@ fn reverse_dns_lookup(remote_addr: &str) -> Option<String> {
     if host.is_empty() { None } else { Some(host) }
 }
 
+async fn reverse_dns_lookup_with_tokio_validation(remote_addr: &str) -> Option<String> {
+    let addr = remote_addr.to_string();
+    let host = tokio::task::spawn_blocking(move || reverse_dns_lookup(&addr))
+        .await
+        .ok()
+        .flatten()?;
+    let remote_ip: IpAddr = remote_addr.parse().ok()?;
+    let host_for_lookup = host.clone();
+    let mut resolved = tokio::net::lookup_host((host_for_lookup.as_str(), 0))
+        .await
+        .ok()?;
+    if resolved.any(|socket| socket.ip() == remote_ip) {
+        Some(host)
+    } else {
+        None
+    }
+}
+
+fn is_rfc1918_ipv4(remote_addr: &str) -> bool {
+    let ip: Ipv4Addr = match remote_addr.parse() {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let [a, b, ..] = ip.octets();
+    a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168)
+}
+
 fn is_running_in_container() -> bool {
     if Path::new("/.dockerenv").exists() {
         return true;
@@ -496,7 +541,7 @@ fn is_running_in_container() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::EgressMonitor;
+    use super::{EgressMonitor, is_rfc1918_ipv4};
     use crate::config::Config;
     use crate::models::{NetConnection, SecurityEvent};
     use tokio::sync::broadcast;
@@ -551,5 +596,15 @@ mod tests {
 
         assert!(reasons_9050.contains(&"tor_port"));
         assert!(reasons_9053.contains(&"tor_port"));
+    }
+
+    #[test]
+    fn rfc1918_detection_matches_private_ranges() {
+        assert!(is_rfc1918_ipv4("10.2.3.4"));
+        assert!(is_rfc1918_ipv4("172.16.9.1"));
+        assert!(is_rfc1918_ipv4("172.31.255.250"));
+        assert!(is_rfc1918_ipv4("192.168.1.10"));
+        assert!(!is_rfc1918_ipv4("172.15.9.1"));
+        assert!(!is_rfc1918_ipv4("203.0.113.5"));
     }
 }
