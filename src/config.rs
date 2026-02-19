@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -184,6 +185,7 @@ impl Config {
             .collect();
         cfg.validate()
             .with_context(|| format!("invalid values in config file {}", config_path.display()))?;
+        cfg.print_startup_warnings();
 
         Ok(cfg)
     }
@@ -192,6 +194,81 @@ impl Config {
         validate_level(&self.alerts.min_severity, "alerts.min_severity")?;
         validate_level(&self.response.stop_min_level, "response.stop_min_level")?;
         Ok(())
+    }
+
+    fn print_startup_warnings(&self) {
+        for warning in self.startup_warnings() {
+            eprintln!("Warning: {warning}");
+        }
+    }
+
+    fn startup_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        if self.alerts.slack.enabled {
+            if self.alerts.slack.url.trim().is_empty() {
+                warnings.push(
+                    "alerts.slack.enabled is true but alerts.slack.url is empty. Slack webhook URL should start with https://hooks.slack.com/services/.".to_string(),
+                );
+            } else if !is_valid_https_url(&self.alerts.slack.url) {
+                warnings.push(
+                    "alerts.slack.url is not a valid HTTPS URL. Slack webhook URL should start with https://hooks.slack.com/services/.".to_string(),
+                );
+            } else if !self
+                .alerts
+                .slack
+                .url
+                .to_ascii_lowercase()
+                .starts_with("https://hooks.slack.com/")
+            {
+                warnings.push(
+                    "alerts.slack.url does not look like a Slack webhook. Slack webhook URL should start with https://hooks.slack.com/services/.".to_string(),
+                );
+            }
+        }
+
+        if self.alerts.discord.enabled {
+            if self.alerts.discord.url.trim().is_empty() {
+                warnings.push(
+                    "alerts.discord.enabled is true but alerts.discord.url is empty. Discord webhook URL should start with https://discord.com/api/webhooks/.".to_string(),
+                );
+            } else if !is_valid_https_url(&self.alerts.discord.url) {
+                warnings.push(
+                    "alerts.discord.url is not a valid HTTPS URL. Discord webhook URL should start with https://discord.com/api/webhooks/.".to_string(),
+                );
+            } else if !self
+                .alerts
+                .discord
+                .url
+                .to_ascii_lowercase()
+                .starts_with("https://discord.com/api/webhooks/")
+                && !self
+                    .alerts
+                    .discord
+                    .url
+                    .to_ascii_lowercase()
+                    .starts_with("https://discordapp.com/api/webhooks/")
+            {
+                warnings.push(
+                    "alerts.discord.url does not look like a Discord webhook. Discord webhook URL should start with https://discord.com/api/webhooks/.".to_string(),
+                );
+            }
+        }
+
+        if self.alerts.telegram.enabled {
+            if !is_valid_telegram_token(&self.alerts.telegram.token) {
+                warnings.push(
+                    "alerts.telegram.token appears invalid. Telegram bot token should look like 123456789:AA... with digits, a colon, and a long secret.".to_string(),
+                );
+            }
+            if !is_numeric_chat_id(&self.alerts.telegram.chat_id) {
+                warnings.push(
+                    "alerts.telegram.chat_id must be numeric (example: 123456789 or -1001234567890).".to_string(),
+                );
+            }
+        }
+
+        warnings
     }
 }
 
@@ -313,9 +390,44 @@ fn validate_level(raw: &str, field_name: &str) -> Result<()> {
     }
 }
 
+fn is_valid_https_url(raw: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw.trim()) else {
+        return false;
+    };
+    parsed.scheme().eq_ignore_ascii_case("https") && parsed.host_str().is_some()
+}
+
+fn is_valid_telegram_token(raw: &str) -> bool {
+    let token = raw.trim();
+    let Some((bot_id, secret)) = token.split_once(':') else {
+        return false;
+    };
+    bot_id.len() >= 6
+        && bot_id.chars().all(|ch| ch.is_ascii_digit())
+        && secret.len() >= 20
+        && secret
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn is_numeric_chat_id(raw: &str) -> bool {
+    let value = raw.trim();
+    if value.is_empty() {
+        return false;
+    }
+
+    let digits = if let Some(rest) = value.strip_prefix('-') {
+        rest
+    } else {
+        value
+    };
+
+    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, is_numeric_chat_id, is_valid_https_url, is_valid_telegram_token};
 
     #[test]
     fn default_config_yaml_parses() {
@@ -373,5 +485,18 @@ egress:
         assert_eq!(parsed.alerts.rate_limit_seconds, 120);
         assert_eq!(parsed.egress.suspicious_ports, vec![4444, 31337]);
         assert_eq!(parsed.egress.suspicious_country_ip_prefixes, vec!["203.0.113."]);
+    }
+
+    #[test]
+    fn webhook_and_telegram_validation_helpers_work() {
+        assert!(is_valid_https_url("https://hooks.slack.com/services/T/B/KEY"));
+        assert!(!is_valid_https_url("http://hooks.slack.com/services/T/B/KEY"));
+        assert!(is_valid_telegram_token(
+            "12345678:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+        ));
+        assert!(!is_valid_telegram_token("token123"));
+        assert!(is_numeric_chat_id("123456"));
+        assert!(is_numeric_chat_id("-100123456"));
+        assert!(!is_numeric_chat_id("chat123"));
     }
 }
