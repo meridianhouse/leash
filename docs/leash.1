@@ -1,0 +1,201 @@
+.TH LEASH 1 "February 2026" "Leash" "User Commands"
+.SH NAME
+leash \- host monitoring and threat detection for AI agent workloads
+.SH SYNOPSIS
+.B leash
+.RI [ --config " PATH" ]
+.RI [ --json ]
+.RI [ --ebpf ]
+.I COMMAND
+.RI [ COMMAND_OPTIONS ]
+.SH DESCRIPTION
+Leash monitors process activity, network behavior, and sensitive filesystem interactions to detect suspicious activity from AI agents and their descendant processes.
+
+Leash reads configuration from \fI~/.config/leash/config.yaml\fR by default. If the config file is missing, Leash falls back to built-in defaults and suggests running \fBleash init\fR.
+.SH GLOBAL OPTIONS
+.TP
+.BR --config " PATH"
+Path to config YAML.
+.TP
+.B --json
+Emit machine-readable JSON output where supported.
+.TP
+.B --ebpf
+Enable eBPF kernel monitoring preview.
+.SH COMMANDS
+.TP
+.B init
+Initialize \fI~/.config/leash/config.yaml\fR from template.
+.TP
+.B start
+Start Leash daemon.
+.TP
+.B watch
+Start Leash and stream detected events.
+.TP
+.B test
+Send test GREEN/YELLOW/ORANGE/RED events through alert sinks.
+.TP
+.B scan
+Run one-time snapshot of active AI agents, process trees, network connections, and sensitive file descriptors.
+.TP
+.B status
+Show daemon status.
+.TP
+.B history
+Show stored event history.
+
+Options:
+.RS
+.TP
+.BR --last " {1h|24h}"
+Time window filter.
+.TP
+.BR --severity " LEVEL"
+Severity filter: \fBgreen\fR, \fByellow\fR, \fBorange\fR, \fBred\fR, \fBnuclear\fR.
+.RE
+.TP
+.B export
+Export stored history events.
+
+Options:
+.RS
+.TP
+.BR --format " {json|csv}"
+Export output format (default: \fBjson\fR).
+.TP
+.BR --last " {1h|24h}"
+Time window filter.
+.TP
+.BR --severity " LEVEL"
+Severity filter: \fBgreen\fR, \fByellow\fR, \fBorange\fR, \fBred\fR, \fBnuclear\fR.
+.RE
+.TP
+.B stop
+Stop running Leash daemon.
+.SH CONFIGURATION
+The default configuration file is YAML. The keys below are supported.
+.SS Core
+.TP
+.B monitor_interval_ms
+Polling interval in milliseconds.
+.TP
+.B ai_agents
+List of process names/tokens treated as AI agents.
+.TP
+.B legitimate_ai_parents
+Parent process names considered expected for AI agents.
+.TP
+.B sensitive_path_keywords
+Keywords used to identify sensitive paths.
+.TP
+.B fim_paths
+Filesystem paths watched by file integrity monitoring.
+.TP
+.B protected_processes
+Process names protected against tamper events.
+.TP
+.B allow_list
+Optional allow list entries with:
+.RS
+.TP
+.B name
+Exact process/token/executable match.
+.TP
+.B reason
+Human-readable reason attached to allowed events.
+.RE
+.SS response
+.TP
+.B response.enable_sigstop
+If true, Leash can send SIGSTOP to processes meeting response thresholds.
+.TP
+.B response.stop_min_level
+Minimum severity for response action. One of: green, yellow, orange, red, nuclear.
+.SS alerts
+.TP
+.B alerts.min_severity
+Minimum severity required for outbound alert delivery.
+.TP
+.B alerts.rate_limit_seconds
+Alert rate limit window per sink.
+.TP
+.B alerts.learning_mode_hours
+Initial learning/suppression window.
+.TP
+.B alerts.known_good_commands
+List of known-good command patterns (legacy compatibility).
+.TP
+.B alerts.deduplication_enabled
+Enable alert deduplication.
+.TP
+.B alerts.deduplication_hours
+Deduplication horizon in hours.
+.TP
+.B alerts.first_process_minutes
+Grace period for first-seen process behavior.
+.TP
+.B alerts.slack.enabled
+Enable Slack webhook sink.
+.TP
+.B alerts.slack.url
+Slack webhook URL. Expected format: \fBhttps://hooks.slack.com/services/<team>/<channel>/<token>\fR.
+.TP
+.B alerts.discord.enabled
+Enable Discord webhook sink.
+.TP
+.B alerts.discord.url
+Discord webhook URL. Expected format: \fBhttps://discord.com/api/webhooks/<id>/<token>\fR.
+.TP
+.B alerts.telegram.enabled
+Enable Telegram sink.
+.TP
+.B alerts.telegram.token
+Telegram bot token.
+.TP
+.B alerts.telegram.chat_id
+Telegram chat id (numeric, can be negative for supergroups).
+.TP
+.B alerts.json_log.enabled
+Enable JSONL alert log sink.
+.TP
+.B alerts.json_log.path
+Path to JSONL alert log file.
+.SS egress
+.TP
+.B egress.suspicious_ports
+Remote destination ports considered suspicious.
+.TP
+.B egress.tor_ports
+Tor-associated destination port list.
+.TP
+.B egress.exfil_domains
+Known exfiltration service domain substrings.
+.TP
+.B egress.suspicious_country_ip_prefixes
+Operator-provided IP prefix list for geopolitical filtering.
+.SH EXAMPLES
+.TP
+Initialize config:
+.B leash init
+.TP
+Start daemon with default config:
+.B leash start
+.TP
+Run with explicit config and JSON output:
+.B leash --config /etc/leash/config.yaml --json watch
+.TP
+Run a one-time scan:
+.B leash scan
+.TP
+Query recent red history:
+.B leash history --last 24h --severity red
+.TP
+Export last hour in CSV:
+.B leash export --format csv --last 1h
+.SH SEE ALSO
+.BR README.md ,
+.BR CLI.md ,
+.BR DETECTIONS.md
+.SH AUTHORS
+Leash contributors.
