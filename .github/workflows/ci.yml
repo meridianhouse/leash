@@ -38,3 +38,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+      - name: Install cargo-bloat
+        run: cargo install cargo-bloat --locked
+
+      - name: Binary size analysis
+        run: cargo bloat --release
