@@ -19,7 +19,7 @@ pub struct Config {
     #[serde(default)]
     pub response: ResponseConfig,
     #[serde(default)]
-    pub alerts: AlertConfig,
+    pub alerts: AlertsConfig,
     #[serde(default)]
     pub egress: EgressConfig,
 }
@@ -33,7 +33,7 @@ pub struct ResponseConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AlertConfig {
+pub struct AlertsConfig {
     #[serde(default = "default_alert_min_level")]
     pub min_level: String,
     #[serde(default)]
@@ -50,24 +50,24 @@ pub struct AlertConfig {
 pub struct SlackAlertConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub webhook_url: String,
+    #[serde(default, alias = "webhook_url")]
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordAlertConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub webhook_url: String,
+    #[serde(default, alias = "webhook_url")]
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramAlertConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub bot_token: String,
+    #[serde(default, alias = "bot_token")]
+    pub token: String,
     #[serde(default)]
     pub chat_id: String,
 }
@@ -103,7 +103,7 @@ impl Default for Config {
                 "leash".into(),
             ],
             response: ResponseConfig::default(),
-            alerts: AlertConfig::default(),
+            alerts: AlertsConfig::default(),
             egress: EgressConfig::default(),
         }
     }
@@ -118,7 +118,7 @@ impl Default for ResponseConfig {
     }
 }
 
-impl Default for AlertConfig {
+impl Default for AlertsConfig {
     fn default() -> Self {
         Self {
             min_level: default_alert_min_level(),
@@ -134,7 +134,7 @@ impl Default for SlackAlertConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            webhook_url: String::new(),
+            url: String::new(),
         }
     }
 }
@@ -143,7 +143,7 @@ impl Default for DiscordAlertConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            webhook_url: String::new(),
+            url: String::new(),
         }
     }
 }
@@ -152,7 +152,7 @@ impl Default for TelegramAlertConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            bot_token: String::new(),
+            token: String::new(),
             chat_id: String::new(),
         }
     }

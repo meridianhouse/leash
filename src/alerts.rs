@@ -46,24 +46,20 @@ impl AlertDispatcher {
                 }
             }
 
-            if self.cfg.alerts.slack.enabled && !self.cfg.alerts.slack.webhook_url.is_empty() {
-                if let Err(err) = self.send_slack(&self.cfg.alerts.slack.webhook_url, &event).await
-                {
+            if self.cfg.alerts.slack.enabled && !self.cfg.alerts.slack.url.is_empty() {
+                if let Err(err) = self.send_slack(&self.cfg.alerts.slack.url, &event).await {
                     warn!(?err, "slack delivery failed");
                 }
             }
 
-            if self.cfg.alerts.discord.enabled && !self.cfg.alerts.discord.webhook_url.is_empty() {
-                if let Err(err) = self
-                    .send_discord(&self.cfg.alerts.discord.webhook_url, &event)
-                    .await
-                {
+            if self.cfg.alerts.discord.enabled && !self.cfg.alerts.discord.url.is_empty() {
+                if let Err(err) = self.send_discord(&self.cfg.alerts.discord.url, &event).await {
                     warn!(?err, "discord delivery failed");
                 }
             }
 
             if self.cfg.alerts.telegram.enabled
-                && !self.cfg.alerts.telegram.bot_token.is_empty()
+                && !self.cfg.alerts.telegram.token.is_empty()
                 && !self.cfg.alerts.telegram.chat_id.is_empty()
             {
                 if let Err(err) = self.send_telegram(&event).await {
@@ -92,52 +88,34 @@ impl AlertDispatcher {
         url: &str,
         event: &SecurityEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let fields = shared_fields(event);
-        let mut blocks = vec![
-            json!({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": format!("*Leash Alert* {}\n{}", severity_badge(event.threat_level), event.narrative)
-                }
-            }),
-            json!({ "type": "divider" }),
-            json!({
-                "type": "section",
-                "fields": fields.iter().map(|(title, value)| {
-                    json!({
-                        "type": "mrkdwn",
-                        "text": format!("*{}*\n{}", title, value)
-                    })
-                }).collect::<Vec<_>>()
-            }),
-        ];
-
-        if event.process.is_some() {
-            blocks.push(json!({
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Acknowledge" },
-                        "action_id": "leash_ack",
-                        "value": "ack"
-                    },
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Investigate" },
-                        "action_id": "leash_investigate",
-                        "value": "investigate"
-                    }
-                ]
-            }));
-        }
-
+        let details = event_details(event);
         let payload = json!({
             "text": format!("[{}] {}", level_label(event.threat_level), event.narrative),
             "attachments": [{
                 "color": slack_color(event.threat_level),
-                "blocks": blocks
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": format!("*Leash Alert* {} *{}*\n{}", severity_badge(event.threat_level), level_label(event.threat_level), event.narrative)
+                        },
+                        "fields": [
+                            { "type": "mrkdwn", "text": format!("*Type*\n`{}`", details.event_type) },
+                            { "type": "mrkdwn", "text": format!("*Process*\n`{}`", details.process) },
+                            { "type": "mrkdwn", "text": format!("*PID*\n`{}`", details.pid) },
+                            { "type": "mrkdwn", "text": format!("*Path*\n`{}`", details.path) },
+                            { "type": "mrkdwn", "text": format!("*MITRE Technique*\n`{}`", details.mitre_technique) }
+                        ]
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            { "type": "mrkdwn", "text": format!("{}", event.timestamp.to_rfc3339()) },
+                            { "type": "mrkdwn", "text": "Leash • AI Agent Visibility" }
+                        ]
+                    }
+                ]
             }]
         });
 
@@ -156,18 +134,19 @@ impl AlertDispatcher {
         url: &str,
         event: &SecurityEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let details = event_details(event);
         let payload = json!({
             "embeds": [{
                 "title": format!("Leash Alert {}", severity_badge(event.threat_level)),
                 "description": event.narrative,
                 "color": discord_color(event.threat_level),
-                "fields": shared_fields(event).into_iter().map(|(name, value)| {
-                    json!({
-                        "name": name,
-                        "value": value,
-                        "inline": true
-                    })
-                }).collect::<Vec<_>>(),
+                "fields": [
+                    { "name": "Event", "value": details.event_type, "inline": true },
+                    { "name": "Process", "value": details.process, "inline": true },
+                    { "name": "PID", "value": details.pid, "inline": true },
+                    { "name": "Path", "value": details.path, "inline": false },
+                    { "name": "MITRE ID", "value": details.mitre_id, "inline": true }
+                ],
                 "footer": { "text": "Leash • AI Agent Visibility" },
                 "timestamp": event.timestamp.to_rfc3339()
             }]
@@ -187,22 +166,23 @@ impl AlertDispatcher {
         &self,
         event: &SecurityEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let token = &self.cfg.alerts.telegram.bot_token;
+        let token = &self.cfg.alerts.telegram.token;
         let chat_id = &self.cfg.alerts.telegram.chat_id;
         let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-        let fields = shared_fields(event);
-        let mut text = format!(
-            "<b>{} Leash Alert</b>\n{}\n\n",
+        let details = event_details(event);
+
+        let text = format!(
+            "<b>{} Leash Alert ({})</b>\n{}\n\n<b>Event:</b> <code>{}</code>\n<b>Process:</b> <code>{}</code>\n<b>PID:</b> <code>{}</code>\n<b>Path:</b> <code>{}</code>\n<b>MITRE ID:</b> <code>{}</code>\n<b>Timestamp:</b> <code>{}</code>",
             severity_badge(event.threat_level),
-            escape_html(&event.narrative)
+            level_label(event.threat_level),
+            escape_html(&event.narrative),
+            escape_html(&details.event_type),
+            escape_html(&details.process),
+            escape_html(&details.pid),
+            escape_html(&details.path),
+            escape_html(&details.mitre_id),
+            escape_html(&event.timestamp.to_rfc3339())
         );
-        for (key, value) in fields {
-            text.push_str(&format!(
-                "<b>{}</b>: {}\n",
-                escape_html(&key),
-                escape_html(&value)
-            ));
-        }
 
         let payload = json!({
             "chat_id": chat_id,
@@ -222,18 +202,17 @@ impl AlertDispatcher {
     }
 }
 
-fn parse_level(raw: &str) -> ThreatLevel {
-    match raw.to_ascii_lowercase().as_str() {
-        "yellow" => ThreatLevel::Yellow,
-        "orange" => ThreatLevel::Orange,
-        "red" => ThreatLevel::Red,
-        "nuclear" => ThreatLevel::Nuclear,
-        _ => ThreatLevel::Green,
-    }
+struct EventDetails {
+    event_type: String,
+    process: String,
+    pid: String,
+    path: String,
+    mitre_id: String,
+    mitre_technique: String,
 }
 
-fn shared_fields(event: &SecurityEvent) -> Vec<(String, String)> {
-    let process_name = event
+fn event_details(event: &SecurityEvent) -> EventDetails {
+    let process = event
         .process
         .as_ref()
         .map(|p| p.name.clone())
@@ -249,20 +228,35 @@ fn shared_fields(event: &SecurityEvent) -> Vec<(String, String)> {
         .map(|f| f.path.clone())
         .or_else(|| event.process.as_ref().map(|p| p.exe.clone()))
         .unwrap_or_else(|| "-".into());
-    let mitre = event
+    let mitre_id = event
+        .mitre
+        .as_ref()
+        .map(|m| m.technique_id.clone())
+        .unwrap_or_else(|| "-".into());
+    let mitre_technique = event
         .mitre
         .as_ref()
         .map(|m| format!("{} {}", m.technique_id, m.name))
         .unwrap_or_else(|| "-".into());
 
-    vec![
-        ("Event Type".into(), event.event_type.to_string()),
-        ("Process".into(), process_name),
-        ("PID".into(), pid),
-        ("Path".into(), path),
-        ("MITRE Technique".into(), mitre),
-        ("Timestamp".into(), event.timestamp.to_rfc3339()),
-    ]
+    EventDetails {
+        event_type: event.event_type.to_string(),
+        process,
+        pid,
+        path,
+        mitre_id,
+        mitre_technique,
+    }
+}
+
+fn parse_level(raw: &str) -> ThreatLevel {
+    match raw.to_ascii_lowercase().as_str() {
+        "yellow" => ThreatLevel::Yellow,
+        "orange" => ThreatLevel::Orange,
+        "red" => ThreatLevel::Red,
+        "nuclear" => ThreatLevel::Nuclear,
+        _ => ThreatLevel::Green,
+    }
 }
 
 fn level_label(level: ThreatLevel) -> &'static str {
@@ -286,19 +280,18 @@ fn severity_badge(level: ThreatLevel) -> &'static str {
 
 fn slack_color(level: ThreatLevel) -> &'static str {
     match level {
-        ThreatLevel::Green => "#2EB67D",
-        ThreatLevel::Yellow => "#ECB22E",
-        ThreatLevel::Orange => "#FF8C00",
-        ThreatLevel::Red | ThreatLevel::Nuclear => "#E01E5A",
+        ThreatLevel::Green => "good",
+        ThreatLevel::Yellow | ThreatLevel::Orange => "warning",
+        ThreatLevel::Red | ThreatLevel::Nuclear => "danger",
     }
 }
 
 fn discord_color(level: ThreatLevel) -> u32 {
     match level {
-        ThreatLevel::Green => 0x2EB67D,
-        ThreatLevel::Yellow => 0xECB22E,
-        ThreatLevel::Orange => 0xFF8C00,
-        ThreatLevel::Red | ThreatLevel::Nuclear => 0xE01E5A,
+        ThreatLevel::Green => 0x00ff00,
+        ThreatLevel::Yellow => 0xffff00,
+        ThreatLevel::Orange => 0xff8800,
+        ThreatLevel::Red | ThreatLevel::Nuclear => 0xff0000,
     }
 }
 

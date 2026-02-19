@@ -16,6 +16,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(about = "Initialize ~/.config/leash/config.yaml from template")]
+    Init,
     #[command(about = "Start Leash daemon")]
     Start,
     #[command(about = "Start and stream detected events")]

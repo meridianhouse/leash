@@ -39,6 +39,9 @@ async fn main() -> Result<(), DynError> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Init => {
+            init_config(cli.json)?;
+        }
         Commands::Start => {
             let cfg = Config::load(cli.config.as_deref())?;
             run_agent(cfg, false, cli.json).await?;
@@ -308,6 +311,30 @@ fn stop_agent(json_output: bool) -> Result<(), DynError> {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("Sent SIGTERM to Leash (PID {pid})");
+    }
+
+    Ok(())
+}
+
+fn init_config(json_output: bool) -> Result<(), DynError> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
+    let target = PathBuf::from(home).join(".config/leash/config.yaml");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let template = include_str!("../config/default.yaml");
+    fs::write(&target, template)?;
+
+    if json_output {
+        let value = serde_json::json!({
+            "initialized": true,
+            "path": target,
+            "timestamp": chrono::Utc::now(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!("Initialized Leash config at {}", target.display());
     }
 
     Ok(())
