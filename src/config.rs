@@ -171,9 +171,8 @@ impl Config {
             return Ok(Self::default());
         }
 
-        let raw = fs::read_to_string(&config_path).with_context(|| {
-            format!("failed to read config file: {}", config_path.display())
-        })?;
+        let raw = fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read config file: {}", config_path.display()))?;
         let mut cfg: Self = serde_yaml::from_str(&raw)
             .with_context(|| format!("invalid YAML in config file {}", config_path.display()))?;
 
@@ -384,9 +383,9 @@ pub fn expand_tilde(input: &str) -> String {
 fn validate_level(raw: &str, field_name: &str) -> Result<()> {
     match raw.to_ascii_lowercase().as_str() {
         "green" | "yellow" | "orange" | "red" | "nuclear" => Ok(()),
-        _ => bail!(
-            "{field_name} must be one of: green, yellow, orange, red, nuclear (got '{raw}')"
-        ),
+        _ => {
+            bail!("{field_name} must be one of: green, yellow, orange, red, nuclear (got '{raw}')")
+        }
     }
 }
 
@@ -484,13 +483,20 @@ egress:
         assert_eq!(parsed.alerts.min_severity, "orange");
         assert_eq!(parsed.alerts.rate_limit_seconds, 120);
         assert_eq!(parsed.egress.suspicious_ports, vec![4444, 31337]);
-        assert_eq!(parsed.egress.suspicious_country_ip_prefixes, vec!["203.0.113."]);
+        assert_eq!(
+            parsed.egress.suspicious_country_ip_prefixes,
+            vec!["203.0.113."]
+        );
     }
 
     #[test]
     fn webhook_and_telegram_validation_helpers_work() {
-        assert!(is_valid_https_url("https://hooks.slack.com/services/T/B/KEY"));
-        assert!(!is_valid_https_url("http://hooks.slack.com/services/T/B/KEY"));
+        assert!(is_valid_https_url(
+            "https://hooks.slack.com/services/T/B/KEY"
+        ));
+        assert!(!is_valid_https_url(
+            "http://hooks.slack.com/services/T/B/KEY"
+        ));
         assert!(is_valid_telegram_token(
             "12345678:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
         ));

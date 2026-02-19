@@ -355,7 +355,10 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::models::{EventType, ProcessInfo, SecurityEvent, ThreatLevel};
+    use std::time::{Duration, Instant};
+    use tokio::sync::broadcast;
 
     fn sample_event() -> SecurityEvent {
         let mut event = SecurityEvent::new(
@@ -384,6 +387,17 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&serialized).expect("parse slack payload json");
         assert!(parsed.get("text").is_some());
+        let attachments = parsed["attachments"]
+            .as_array()
+            .expect("slack attachments must be an array");
+        assert!(
+            !attachments.is_empty(),
+            "slack attachments should not be empty"
+        );
+        assert!(
+            attachments[0]["blocks"].is_array(),
+            "first slack attachment should have blocks array"
+        );
     }
 
     #[test]
@@ -392,7 +406,14 @@ mod tests {
         let serialized = serde_json::to_string(&payload).expect("serialize discord payload");
         let parsed: serde_json::Value =
             serde_json::from_str(&serialized).expect("parse discord payload json");
-        assert!(parsed.get("embeds").is_some());
+        let embeds = parsed["embeds"]
+            .as_array()
+            .expect("discord embeds must be an array");
+        assert!(!embeds.is_empty(), "discord embeds should not be empty");
+        assert!(
+            embeds[0].get("color").is_some(),
+            "first discord embed should include color"
+        );
     }
 
     #[test]
@@ -402,5 +423,40 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&serialized).expect("parse telegram payload json");
         assert_eq!(parsed["chat_id"], "123456");
+        assert!(
+            parsed["text"].is_string(),
+            "telegram payload text must be a string"
+        );
+        assert_eq!(parsed["parse_mode"], "HTML");
+    }
+
+    fn dispatcher() -> AlertDispatcher {
+        let cfg = Config::default();
+        let (_, rx) = broadcast::channel::<SecurityEvent>(4);
+        AlertDispatcher::new(cfg, rx).expect("dispatcher should initialize in test")
+    }
+
+    #[test]
+    fn rate_limiter_blocks_duplicate_events_within_window() {
+        let mut dispatcher = dispatcher();
+        let event = sample_event();
+
+        assert!(dispatcher.should_send_for_event_type(&event));
+        assert!(!dispatcher.should_send_for_event_type(&event));
+    }
+
+    #[test]
+    fn rate_limiter_allows_events_after_window_expires() {
+        let mut dispatcher = dispatcher();
+        let event = sample_event();
+        let key = event.event_type.to_string();
+
+        assert!(dispatcher.should_send_for_event_type(&event));
+        dispatcher.last_alert_by_type.insert(
+            key,
+            Instant::now() - dispatcher.rate_limit - Duration::from_millis(1),
+        );
+
+        assert!(dispatcher.should_send_for_event_type(&event));
     }
 }

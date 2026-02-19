@@ -48,7 +48,10 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     let watchdog = Watchdog::new(cfg.clone(), event_tx.clone());
 
     let watch_handle = if watch_mode {
-        Some(tokio::spawn(watch_events(event_tx.subscribe(), json_output)))
+        Some(tokio::spawn(watch_events(
+            event_tx.subscribe(),
+            json_output,
+        )))
     } else {
         None
     };

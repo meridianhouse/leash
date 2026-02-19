@@ -87,7 +87,8 @@ impl EgressMonitor {
                     &conn.remote_addr,
                     conn.remote_port,
                 );
-                let class = self.classify_destination(&conn, &cmdline, &service, &suspicious_reasons);
+                let class =
+                    self.classify_destination(&conn, &cmdline, &service, &suspicious_reasons);
                 let level = class.threat_level();
                 let event_type = class.event_type();
                 let class_label = class.paint_label();
@@ -188,7 +189,9 @@ impl EgressMonitor {
 
         match (remote_addr, remote_port) {
             (_, 443) if remote_addr.starts_with("140.82.") => Some("GitHub".to_string()),
-            (_, 443) if remote_addr.starts_with("104.18.") => Some("Cloudflare-hosted API".to_string()),
+            (_, 443) if remote_addr.starts_with("104.18.") => {
+                Some("Cloudflare-hosted API".to_string())
+            }
             (_, 443) if remote_addr.starts_with("13.107.") => Some("Microsoft service".to_string()),
             _ => None,
         }
@@ -261,7 +264,9 @@ impl DestinationClass {
     fn event_type(self) -> EventType {
         match self {
             DestinationClass::KnownBad => EventType::NetworkSuspicious,
-            DestinationClass::KnownGood | DestinationClass::Unknown => EventType::NetworkNewConnection,
+            DestinationClass::KnownGood | DestinationClass::Unknown => {
+                EventType::NetworkNewConnection
+            }
         }
     }
 }
@@ -405,9 +410,65 @@ fn reverse_dns_lookup(remote_addr: &str) -> Option<String> {
         .ok()?
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
+    if host.is_empty() { None } else { Some(host) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EgressMonitor;
+    use crate::config::Config;
+    use crate::models::{NetConnection, SecurityEvent};
+    use tokio::sync::broadcast;
+
+    fn monitor() -> EgressMonitor {
+        let cfg = Config::default();
+        let (tx, _) = broadcast::channel::<SecurityEvent>(4);
+        EgressMonitor::new(cfg, tx)
+    }
+
+    fn conn_with_port(port: u16) -> NetConnection {
+        NetConnection {
+            local_addr: "10.0.0.1".to_string(),
+            local_port: 12345,
+            remote_addr: "203.0.113.10".to_string(),
+            remote_port: port,
+            state: "ESTABLISHED".to_string(),
+            pid: 999,
+            process_name: "python3".to_string(),
+        }
+    }
+
+    #[test]
+    fn reverse_shell_port_detection_flags_4444_and_5555() {
+        let monitor = monitor();
+        let reasons_4444 = monitor.suspicious_reasons(&conn_with_port(4444), "");
+        let reasons_5555 = monitor.suspicious_reasons(&conn_with_port(5555), "");
+
+        assert!(reasons_4444.contains(&"reverse_shell_port"));
+        assert!(reasons_5555.contains(&"reverse_shell_port"));
+    }
+
+    #[test]
+    fn known_good_service_identification_handles_anthropic_api() {
+        let monitor = monitor();
+        let service = monitor.known_service_name(Some("api.anthropic.com"), "1.1.1.1", 443);
+        assert_eq!(service.as_deref(), Some("Anthropic API"));
+    }
+
+    #[test]
+    fn known_good_service_identification_handles_openai_suffix() {
+        let monitor = monitor();
+        let service = monitor.known_service_name(Some("api.openai.com"), "1.1.1.1", 443);
+        assert_eq!(service.as_deref(), Some("OpenAI API"));
+    }
+
+    #[test]
+    fn tor_port_range_detection_flags_tor_ports() {
+        let monitor = monitor();
+        let reasons_9050 = monitor.suspicious_reasons(&conn_with_port(9050), "");
+        let reasons_9053 = monitor.suspicious_reasons(&conn_with_port(9053), "");
+
+        assert!(reasons_9050.contains(&"tor_port"));
+        assert!(reasons_9053.contains(&"tor_port"));
     }
 }

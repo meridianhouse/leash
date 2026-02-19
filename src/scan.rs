@@ -94,7 +94,8 @@ pub fn run_scan(cfg: Config, json_output: bool) -> Result<(), DynError> {
                 }
             });
         let mut network_connections = collect_network_connections(&monitored, &process_table);
-        let mut sensitive_open_files = collect_sensitive_open_files(&monitored, &process_table, &cfg);
+        let mut sensitive_open_files =
+            collect_sensitive_open_files(&monitored, &process_table, &cfg);
 
         network_connections.sort_by(|a, b| {
             a.pid
