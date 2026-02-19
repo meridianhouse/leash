@@ -48,3 +48,11 @@ nix.workspace = true
 rusqlite.workspace = true
 nu-ansi-term = "0.50.3"
 anyhow = { path = "third_party/anyhow" }
+
+[dev-dependencies]
+quickcheck = { path = "third_party/quickcheck" }
+criterion = { path = "third_party/criterion" }
+
+[[bench]]
+name = "benchmarks"
+harness = false

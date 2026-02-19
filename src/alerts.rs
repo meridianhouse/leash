@@ -457,7 +457,10 @@ fn redact_fixed_alnum_secret(input: &str, prefix: &str, tail_len: usize) -> Stri
         output.push_str(&input[idx..start]);
 
         let secret_start = start + prefix.len();
-        let tail = input[secret_start..].chars().take(tail_len).collect::<String>();
+        let tail = input[secret_start..]
+            .chars()
+            .take(tail_len)
+            .collect::<String>();
         if tail.chars().count() == tail_len
             && tail
                 .chars()
@@ -493,11 +496,14 @@ fn redact_assignment_secrets(input: &str) -> String {
             let key = &input[key_start..idx];
             if idx < input.len()
                 && input[idx..].starts_with('=')
-                && keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+                && keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
             {
                 output.push_str(key);
                 output.push('=');
                 idx += 1;
+                let secret_start = idx;
                 while idx < input.len() {
                     let ch = input[idx..].chars().next().unwrap_or_default();
                     if ch.is_ascii_whitespace() || ch == '&' {
@@ -505,7 +511,12 @@ fn redact_assignment_secrets(input: &str) -> String {
                     }
                     idx += ch.len_utf8();
                 }
-                output.push_str("[REDACTED]");
+                let secret_len = idx.saturating_sub(secret_start);
+                if secret_len >= "[REDACTED]".len() {
+                    output.push_str("[REDACTED]");
+                } else {
+                    output.push_str(&"*".repeat(secret_len));
+                }
                 continue;
             }
             output.push_str(key);

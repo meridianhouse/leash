@@ -126,6 +126,15 @@ impl FileIntegrityMonitor {
         let mut event =
             SecurityEvent::new(event_type, level, format!("Sensitive file {label}: {key}"));
         event.file_event = Some(file_event);
+
+        if matches!(kind, EventKind::Create(_) | EventKind::Modify(_))
+            && let Ok(content) = fs::read_to_string(path)
+            && let Some(injection_event) =
+                crate::prompt_injection::scan_file_for_injection(&key, &content)
+        {
+            let _ = self.tx.send(injection_event);
+        }
+
         Some(mitre::infer_and_tag(event))
     }
 }

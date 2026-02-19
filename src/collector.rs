@@ -215,6 +215,15 @@ impl ProcessCollector {
             ));
         }
 
+        // Prompt injection detection in command lines
+        if let Some(injection_event) = crate::prompt_injection::scan_cmdline_for_injection(
+            &snapshot.info.cmdline,
+            snapshot.info.pid,
+            &snapshot.info.name,
+        ) {
+            events.push(injection_event);
+        }
+
         events
     }
 
@@ -403,9 +412,10 @@ impl ProcessCollector {
         let cmdline = cmdline.to_ascii_lowercase();
         let exe = exe.to_ascii_lowercase();
 
-        self.cfg.allow_list.iter().find(|entry| {
-            allow_list_entry_matches(&entry.name, &name, &cmdline, &exe)
-        })
+        self.cfg
+            .allow_list
+            .iter()
+            .find(|entry| allow_list_entry_matches(&entry.name, &name, &cmdline, &exe))
     }
 
     fn read_open_fds(&self, pid: i32) -> Vec<String> {
@@ -526,7 +536,10 @@ fn redact_fixed_alnum_secret(input: &str, prefix: &str, tail_len: usize) -> Stri
         output.push_str(&input[idx..start]);
 
         let secret_start = start + prefix.len();
-        let tail = input[secret_start..].chars().take(tail_len).collect::<String>();
+        let tail = input[secret_start..]
+            .chars()
+            .take(tail_len)
+            .collect::<String>();
         if tail.chars().count() == tail_len
             && tail
                 .chars()
@@ -561,11 +574,14 @@ fn redact_assignment_secrets(input: &str) -> String {
             let key = &input[key_start..idx];
             if idx < input.len()
                 && input[idx..].starts_with('=')
-                && keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+                && keys
+                    .iter()
+                    .any(|candidate| key.eq_ignore_ascii_case(candidate))
             {
                 output.push_str(key);
                 output.push('=');
                 idx += 1;
+                let secret_start = idx;
                 while idx < input.len() {
                     let ch = input[idx..].chars().next().unwrap_or_default();
                     if ch.is_ascii_whitespace() || ch == '&' {
@@ -573,7 +589,12 @@ fn redact_assignment_secrets(input: &str) -> String {
                     }
                     idx += ch.len_utf8();
                 }
-                output.push_str("[REDACTED]");
+                let secret_len = idx.saturating_sub(secret_start);
+                if secret_len >= "[REDACTED]".len() {
+                    output.push_str("[REDACTED]");
+                } else {
+                    output.push_str(&"*".repeat(secret_len));
+                }
                 continue;
             }
             output.push_str(key);
@@ -894,7 +915,11 @@ mod tests {
                 .match_allow_list("codex", "codex run", "/usr/local/bin/codex")
                 .is_none()
         );
-        assert!(collector.match_allow_list("code", "code .", "/usr/bin/code").is_some());
+        assert!(
+            collector
+                .match_allow_list("code", "code .", "/usr/bin/code")
+                .is_some()
+        );
         assert!(
             collector
                 .match_allow_list("sshd", "sshd: ryan", "/usr/sbin/sshd")

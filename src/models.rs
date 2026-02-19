@@ -124,6 +124,7 @@ pub struct SecurityEvent {
 }
 
 impl SecurityEvent {
+    /// Creates a new security event with the current UTC timestamp and empty optional fields.
     pub fn new(event_type: EventType, threat_level: ThreatLevel, narrative: String) -> Self {
         Self {
             event_type,

@@ -273,6 +273,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "criterion"
+version = "0.0.1"
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,10 +799,12 @@ dependencies = [
  "blake3",
  "chrono",
  "clap",
+ "criterion",
  "nix",
  "notify",
  "nu-ansi-term",
  "procfs",
+ "quickcheck",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1077,6 +1083,10 @@ dependencies = [
  "chrono",
  "hex",
 ]
+
+[[package]]
+name = "quickcheck"
+version = "0.0.1"
 
 [[package]]
 name = "quinn"

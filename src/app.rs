@@ -10,8 +10,8 @@ use crate::response::ResponseEngine;
 use crate::stats;
 use crate::test_events::build_test_events;
 use crate::watchdog::Watchdog;
-use nix::sys::signal::{self, Signal};
 use nix::libc;
+use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use nu_ansi_term::Color;
 use std::collections::VecDeque;
@@ -19,11 +19,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval, sleep};
 use tracing::{debug, error, info, warn};
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -94,12 +96,14 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
 async fn wait_for_shutdown_signal() -> Result<(), DynError> {
     #[cfg(unix)]
     {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            ctrl_c = tokio::signal::ctrl_c() => ctrl_c?,
-            _ = sigterm.recv() => {}
+        install_signal_handlers()?;
+        loop {
+            if SHUTDOWN_REQUESTED.swap(false, Ordering::SeqCst) {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -107,6 +111,28 @@ async fn wait_for_shutdown_signal() -> Result<(), DynError> {
         tokio::signal::ctrl_c().await?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+extern "C" fn shutdown_signal_handler(_: i32) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() -> Result<(), DynError> {
+    let action = signal::SigAction::new(
+        signal::SigHandler::Handler(shutdown_signal_handler),
+        signal::SaFlags::SA_RESTART,
+        signal::SigSet::empty(),
+    );
+
+    // SAFETY: handler only updates an atomic flag and is async-signal-safe.
+    unsafe {
+        signal::sigaction(Signal::SIGINT, &action)?;
+        signal::sigaction(Signal::SIGTERM, &action)?;
+    }
+
+    Ok(())
 }
 
 pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynError> {
@@ -192,8 +218,12 @@ pub fn print_status(json_output: bool) -> Result<(), DynError> {
 
 pub fn stop_agent(json_output: bool) -> Result<(), DynError> {
     let pid_file = pid_file_path()?;
-    let pid = read_pid_from_file(&pid_file)?
-        .ok_or_else(|| format!("Leash is not running (missing or stale PID file at {})", pid_file.display()))?;
+    let pid = read_pid_from_file(&pid_file)?.ok_or_else(|| {
+        format!(
+            "Leash is not running (missing or stale PID file at {})",
+            pid_file.display()
+        )
+    })?;
     signal::kill(Pid::from_raw(pid), Signal::SIGTERM)?;
     cleanup_pid_file();
 
@@ -360,11 +390,7 @@ fn read_pid_from_file(path: &Path) -> Result<Option<i32>, DynError> {
 
     let current_uid = current_uid();
     if metadata.uid() != current_uid {
-        return Err(format!(
-            "PID file {} is not owned by current user",
-            path.display()
-        )
-        .into());
+        return Err(format!("PID file {} is not owned by current user", path.display()).into());
     }
 
     let pid_raw = fs::read_to_string(path)?;
