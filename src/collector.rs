@@ -72,9 +72,10 @@ impl ProcessCollector {
 
     fn analyze_new_process(
         &self,
-        proc: ProcessInfo,
+        mut proc: ProcessInfo,
         all: &HashMap<i32, ProcessInfo>,
     ) -> SecurityEvent {
+        proc.parent_chain = self.build_parent_chain(proc.ppid, all);
         let lower_name = proc.name.to_lowercase();
         let parent_name = all
             .get(&proc.ppid)
@@ -144,6 +145,24 @@ impl ProcessCollector {
         );
         event.process = Some(proc);
         mitre::infer_and_tag(event)
+    }
+
+    fn build_parent_chain(&self, start_ppid: i32, all: &HashMap<i32, ProcessInfo>) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut current = start_ppid;
+
+        for _ in 0..6 {
+            if current <= 1 {
+                break;
+            }
+            let Some(parent) = all.get(&current) else {
+                break;
+            };
+            chain.push(format!("{}({})", parent.name, parent.pid));
+            current = parent.ppid;
+        }
+
+        chain
     }
 
     fn read_process(&self, proc: &Process) -> Option<ProcessInfo> {

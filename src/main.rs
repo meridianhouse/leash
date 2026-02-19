@@ -21,6 +21,8 @@ use crate::watchdog::Watchdog;
 use clap::Parser;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
+use nu_ansi_term::{AnsiString, Color, Style};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
@@ -66,6 +68,10 @@ async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Result<(
     ensure_single_instance()?;
     write_pid_file()?;
 
+    if !json_output {
+        print_startup_banner();
+    }
+
     let (event_tx, _) = broadcast::channel::<SecurityEvent>(8_192);
     let collector = ProcessCollector::new(cfg.clone(), event_tx.clone());
     let egress = EgressMonitor::new(cfg.clone(), event_tx.clone());
@@ -109,11 +115,17 @@ async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Result<(
 }
 
 async fn watch_events(mut rx: broadcast::Receiver<SecurityEvent>, json_output: bool) {
-    let mut ticker = interval(Duration::from_secs(2));
+    let mut ticker = interval(Duration::from_millis(700));
+    let mut recent_events: VecDeque<SecurityEvent> = VecDeque::with_capacity(20);
+    let started_at = chrono::Utc::now();
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                debug!("watch loop heartbeat");
+                if !json_output {
+                    render_watch_ui(&recent_events, started_at);
+                } else {
+                    debug!("watch loop heartbeat");
+                }
             }
             msg = rx.recv() => {
                 match msg {
@@ -124,12 +136,11 @@ async fn watch_events(mut rx: broadcast::Receiver<SecurityEvent>, json_output: b
                                 Err(err) => error!(?err, "failed to serialize event"),
                             }
                         } else {
-                            println!(
-                                "{} [{}] {}",
-                                color_for_level(event.threat_level),
-                                event.event_type,
-                                event.narrative
-                            );
+                            if recent_events.len() >= 20 {
+                                let _ = recent_events.pop_back();
+                            }
+                            recent_events.push_front(event);
+                            render_watch_ui(&recent_events, started_at);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -142,14 +153,93 @@ async fn watch_events(mut rx: broadcast::Receiver<SecurityEvent>, json_output: b
     }
 }
 
-fn color_for_level(level: ThreatLevel) -> &'static str {
-    match level {
-        ThreatLevel::Green => "\x1b[32mGREEN\x1b[0m",
-        ThreatLevel::Yellow => "\x1b[33mYELLOW\x1b[0m",
-        ThreatLevel::Orange => "\x1b[38;5;208mORANGE\x1b[0m",
-        ThreatLevel::Red => "\x1b[31mRED\x1b[0m",
-        ThreatLevel::Nuclear => "\x1b[35mNUCLEAR\x1b[0m",
+fn render_watch_ui(recent_events: &VecDeque<SecurityEvent>, started_at: chrono::DateTime<chrono::Utc>) {
+    print!("\x1b[2J\x1b[H");
+    let now = chrono::Local::now();
+    let uptime = chrono::Utc::now() - started_at;
+    println!(
+        "{}  {}  uptime={}s",
+        Style::new().bold().paint("LEASH WATCH"),
+        now.format("%Y-%m-%d %H:%M:%S"),
+        uptime.num_seconds()
+    );
+    println!("{}", "─".repeat(90));
+
+    if recent_events.is_empty() {
+        println!("No events yet. Waiting for telemetry...");
+        return;
     }
+
+    for event in recent_events.iter().take(12) {
+        let level = color_for_level(event.threat_level);
+        println!(
+            "{} {} {}",
+            level,
+            Color::Cyan.paint(format!("[{}]", event.event_type)),
+            event.narrative
+        );
+        println!("   time: {}", event.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S"));
+        if let Some(process) = &event.process {
+            println!(
+                "   proc: {} ({})  exe: {}",
+                Style::new().bold().paint(process.name.clone()),
+                process.pid,
+                truncate(&process.exe, 50)
+            );
+            println!("   tree: {}", format_process_tree(process));
+        }
+        if let Some(file_event) = &event.file_event {
+            println!("   path: {}", truncate(&file_event.path, 80));
+        }
+        if let Some(mitre) = &event.mitre {
+            println!("   mitre: {} {}", mitre.technique_id, mitre.name);
+        }
+        println!("{}", Style::new().dimmed().paint("·".repeat(90)));
+    }
+}
+
+fn color_for_level(level: ThreatLevel) -> AnsiString<'static> {
+    match level {
+        ThreatLevel::Green => Color::Green.bold().paint("GREEN"),
+        ThreatLevel::Yellow => Color::Yellow.bold().paint("YELLOW"),
+        ThreatLevel::Orange => Color::Fixed(208).bold().paint("ORANGE"),
+        ThreatLevel::Red => Color::Red.bold().paint("RED"),
+        ThreatLevel::Nuclear => Color::Purple.bold().paint("NUCLEAR"),
+    }
+}
+
+fn format_process_tree(process: &crate::models::ProcessInfo) -> String {
+    if process.parent_chain.is_empty() {
+        return format!("{}({})", process.name, process.pid);
+    }
+
+    let mut parts = process.parent_chain.clone();
+    parts.reverse();
+    parts.push(format!("{}({})", process.name, process.pid));
+    parts.join(" -> ")
+}
+
+fn truncate(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        value.to_string()
+    } else {
+        format!("{}...", value.chars().take(max_len.saturating_sub(3)).collect::<String>())
+    }
+}
+
+fn print_startup_banner() {
+    println!(
+        "{}",
+        Color::Cyan.bold().paint(
+            r#"
+ _      _____    _    ____  _   _
+| |    | ____|  / \  / ___|| | | |
+| |    |  _|   / _ \ \___ \| |_| |
+| |___ | |___ / ___ \ ___) |  _  |
+|_____||_____/_/   \_\____/|_| |_|
+"#
+        )
+    );
 }
 
 fn ensure_single_instance() -> Result<(), DynError> {
@@ -195,9 +285,9 @@ fn print_status(json_output: bool) -> Result<(), DynError> {
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if running {
-        println!("\x1b[32mLeash is running\x1b[0m");
+        println!("{}", Color::Green.paint("Leash is running"));
     } else {
-        println!("\x1b[31mLeash is stopped\x1b[0m");
+        println!("{}", Color::Red.paint("Leash is stopped"));
     }
 
     Ok(())

@@ -36,3 +36,4 @@ reqwest.workspace = true
 notify.workspace = true
 blake3.workspace = true
 nix.workspace = true
+nu-ansi-term = "0.50.3"

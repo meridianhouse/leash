@@ -750,6 +750,7 @@ dependencies = [
  "clap",
  "nix",
  "notify",
+ "nu-ansi-term",
  "procfs",
  "reqwest",
  "serde",
