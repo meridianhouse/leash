@@ -84,14 +84,6 @@ impl AlertDispatcher {
                 self.track_process_start_time(proc.pid);
             }
 
-            let scrubbed_event = scrub_event(&event);
-
-            if self.cfg.alerts.json_log.enabled
-                && let Err(err) = self.write_local_log(&scrubbed_event)
-            {
-                error!(?err, "failed to write alert log");
-            }
-
             if event.allowed {
                 info!(
                     event_type = %event.event_type,
@@ -104,6 +96,15 @@ impl AlertDispatcher {
             // Check if we should alert on this event
             if !self.should_alert(&event) {
                 continue;
+            }
+
+            let enriched_event = with_process_tree_context(&event);
+            let scrubbed_event = scrub_event(&enriched_event);
+
+            if self.cfg.alerts.json_log.enabled
+                && let Err(err) = self.write_local_log(&scrubbed_event)
+            {
+                error!(?err, "failed to write alert log");
             }
 
             let (is_duplicate, dedup_summaries) = self.process_deduplication(&event);
@@ -661,6 +662,103 @@ pub fn escape_html(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn with_process_tree_context(event: &SecurityEvent) -> SecurityEvent {
+    let mut out = event.clone();
+    let Some(process) = out.process.as_ref() else {
+        return out;
+    };
+
+    let Some(context) = process_tree_context(process.pid, &process.name) else {
+        return out;
+    };
+
+    if !out.narrative.contains("Process: ") {
+        out.narrative = format!("{} | {}", out.narrative, context);
+    }
+    out
+}
+
+fn process_tree_context(pid: i32, process_name: &str) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+
+    let mut nodes = vec![(process_name.to_string(), pid)];
+    let mut current_pid = pid;
+    for _ in 1..3 {
+        let Some((ppid, parent_name)) = parent_process_info(current_pid) else {
+            break;
+        };
+        if ppid <= 0 || ppid == current_pid {
+            break;
+        }
+        nodes.push((parent_name, ppid));
+        current_pid = ppid;
+    }
+
+    if nodes.len() < 2 {
+        return None;
+    }
+
+    let labels = ["Process", "Parent", "Grandparent"];
+    let text = nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, node_pid))| {
+            format!(
+                "{}: {} (PID {})",
+                labels.get(idx).copied().unwrap_or("Ancestor"),
+                name,
+                node_pid
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    Some(text)
+}
+
+fn parent_process_info(pid: i32) -> Option<(i32, String)> {
+    let (_current_name, parent_pid) = read_proc_status_name_and_ppid(pid)?;
+    if parent_pid <= 0 {
+        return None;
+    }
+    let parent_name = read_proc_name(parent_pid).unwrap_or_else(|| "unknown".to_string());
+    Some((parent_pid, parent_name))
+}
+
+fn read_proc_name(pid: i32) -> Option<String> {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| read_proc_status_name_and_ppid(pid).map(|(name, _)| name))
+}
+
+fn read_proc_status_name_and_ppid(pid: i32) -> Option<(String, i32)> {
+    let raw = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let mut name: Option<String> = None;
+    let mut ppid: Option<i32> = None;
+
+    for line in raw.lines() {
+        if let Some(value) = line.strip_prefix("Name:") {
+            let parsed = value.trim();
+            if !parsed.is_empty() {
+                name = Some(parsed.to_string());
+            }
+        } else if let Some(value) = line.strip_prefix("PPid:")
+            && let Ok(parsed) = value.trim().parse::<i32>()
+        {
+            ppid = Some(parsed);
+        }
+
+        if name.is_some() && ppid.is_some() {
+            break;
+        }
+    }
+
+    Some((name?, ppid?))
+}
+
 fn scrub_event(event: &SecurityEvent) -> SecurityEvent {
     let mut out = event.clone();
     out.narrative = scrub_secrets(&out.narrative);
@@ -1202,5 +1300,22 @@ mod tests {
         assert!(sanitized.contains("@ everyone"));
         assert!(sanitized.contains("< @"));
         assert!(!sanitized.contains('`'));
+    }
+
+    #[test]
+    fn process_tree_context_includes_labels() {
+        let pid = std::process::id() as i32;
+        let name = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_name().map(|entry| entry.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "test-bin".to_string());
+        let context = process_tree_context(pid, &name).expect("context should resolve");
+        assert!(context.contains("Process:"));
+        assert!(context.contains("Parent:"));
+    }
+
+    #[test]
+    fn process_tree_context_ignores_invalid_pid() {
+        assert!(process_tree_context(-1, "invalid").is_none());
     }
 }
