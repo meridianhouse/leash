@@ -56,6 +56,8 @@ pub struct AlertsConfig {
     pub learning_mode_hours: u64,
     #[serde(default)]
     pub known_good_commands: Vec<KnownGoodCommand>,
+    #[serde(default = "default_deduplication_enabled")]
+    pub deduplication_enabled: bool,
     #[serde(default = "default_deduplication_hours")]
     pub deduplication_hours: u64,
     #[serde(default = "default_first_process_minutes")]
@@ -164,6 +166,7 @@ impl Default for AlertsConfig {
             rate_limit_seconds: default_alert_rate_limit_seconds(),
             learning_mode_hours: default_learning_mode_hours(),
             known_good_commands: Vec::new(),
+            deduplication_enabled: default_deduplication_enabled(),
             deduplication_hours: default_deduplication_hours(),
             first_process_minutes: default_first_process_minutes(),
             slack: SlackAlertConfig::default(),
@@ -342,8 +345,12 @@ fn default_learning_mode_hours() -> u64 {
     24
 }
 
+fn default_deduplication_enabled() -> bool {
+    true
+}
+
 fn default_deduplication_hours() -> u64 {
-    24
+    0
 }
 
 fn default_first_process_minutes() -> u64 {
@@ -550,6 +557,8 @@ mod tests {
             .expect("default.yaml should parse");
         assert_eq!(parsed.alerts.min_severity, "orange");
         assert_eq!(parsed.alerts.rate_limit_seconds, 300);
+        assert!(!parsed.alerts.deduplication_enabled);
+        assert_eq!(parsed.alerts.deduplication_hours, 0);
         assert!(
             parsed
                 .ai_agents
@@ -576,6 +585,8 @@ response:
 alerts:
   min_severity: orange
   rate_limit_seconds: 120
+  deduplication_enabled: true
+  deduplication_hours: 6
   slack:
     enabled: true
     url: https://hooks.slack.com/services/test
@@ -604,6 +615,8 @@ egress:
         assert_eq!(parsed.response.stop_min_level, "red");
         assert_eq!(parsed.alerts.min_severity, "orange");
         assert_eq!(parsed.alerts.rate_limit_seconds, 120);
+        assert!(parsed.alerts.deduplication_enabled);
+        assert_eq!(parsed.alerts.deduplication_hours, 6);
         assert_eq!(parsed.egress.suspicious_ports, vec![4444, 31337]);
         assert_eq!(
             parsed.egress.suspicious_country_ip_prefixes,

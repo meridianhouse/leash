@@ -64,6 +64,8 @@ pub struct ProcessInfo {
     pub username: String,
     pub open_files: Vec<String>,
     pub parent_chain: Vec<String>,
+    #[serde(default)]
+    pub start_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

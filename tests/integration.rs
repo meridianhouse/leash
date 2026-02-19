@@ -680,7 +680,7 @@ async fn webhook_valid_url_receives_alert_posts() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(server.request_count() >= 4);
+    assert!(server.request_count() >= 2, "Expected at least 2 alerts (orange+red), got {}", server.request_count());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -723,7 +723,7 @@ async fn webhook_404_and_500_are_non_fatal() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(server.request_count() >= 4);
+        assert!(server.request_count() >= 2, "Expected at least 2 alerts (orange+red), got {}", server.request_count());
     }
 }
 

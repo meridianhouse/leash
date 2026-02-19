@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, NetConnection, SecurityEvent, ThreatLevel};
+use chrono::Utc;
 use nix::libc;
 use nu_ansi_term::Color;
 use std::collections::{HashMap, HashSet};
@@ -367,12 +368,7 @@ fn inode_to_process(proc_root: &str) -> HashMap<u64, (i32, String, String)> {
             Ok(proc) => proc,
             Err(_) => continue,
         };
-        let pid = match entry
-            .file_name()
-            .to_string_lossy()
-            .parse::<i32>()
-            .ok()
-        {
+        let pid = match entry.file_name().to_string_lossy().parse::<i32>().ok() {
             Some(pid) => pid,
             None => continue,
         };

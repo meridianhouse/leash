@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::models::{SecurityEvent, ThreatLevel};
+use crate::models::{EventType, SecurityEvent, ThreatLevel};
 use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
@@ -25,8 +25,8 @@ pub struct AlertDispatcher {
     // Per-process suppression: (agent_name, cmd_pattern) -> last_seen
     normal_commands: Mutex<HashMap<(String, String), Instant>>,
 
-    // Deduplication: hash of (agent, cmdline_pattern) -> (timestamp, was_alerted)
-    deduplication_cache: Mutex<HashMap<String, (Instant, bool)>>,
+    // Deduplication: hash of (agent, cmdline_pattern) -> last_seen
+    deduplication_cache: Mutex<HashMap<String, Instant>>,
 
     // Process tracking for 5-minute suppression
     process_start_times: Mutex<HashMap<i32, Instant>>,
@@ -166,7 +166,28 @@ impl AlertDispatcher {
             .insert(key, Instant::now());
     }
 
-    fn is_duplicate(&self, agent_name: &str, cmdline: &str) -> bool {
+    fn deduplication_enabled(&self) -> bool {
+        self.cfg.alerts.deduplication_enabled && self.cfg.alerts.deduplication_hours > 0
+    }
+
+    fn should_track_for_dedup(&self, event: &SecurityEvent, cmdline: &str) -> bool {
+        if !self.deduplication_enabled() {
+            return false;
+        }
+
+        // Dangerous command patterns must always alert and never be deduplicated.
+        if is_non_deduplicable_dangerous_command(cmdline) {
+            return false;
+        }
+
+        is_failed_or_suspicious_event(event)
+    }
+
+    fn is_duplicate(&self, event: &SecurityEvent, agent_name: &str, cmdline: &str) -> bool {
+        if !self.should_track_for_dedup(event, cmdline) {
+            return false;
+        }
+
         let hash = compute_event_hash(agent_name, cmdline);
         let dedup_window = Duration::from_secs(self.cfg.alerts.deduplication_hours * 3600);
         let now = Instant::now();
@@ -174,23 +195,17 @@ impl AlertDispatcher {
         let mut cache = self.deduplication_cache.lock().unwrap();
 
         // Clean old entries
-        cache.retain(|_, (time, _)| now.duration_since(*time) < dedup_window);
+        cache.retain(|_, time| now.duration_since(*time) < dedup_window);
 
         // Check if this event was already seen
-        if let Some((last_time, was_alerted)) = cache.get(&hash) {
-            let time_since_last = now.duration_since(*last_time);
-            // If it was already alerted and within window, suppress
-            if *was_alerted && time_since_last < dedup_window {
+        if let Some(last_time) = cache.get(&hash) {
+            if now.duration_since(*last_time) < dedup_window {
                 return true;
             }
-            // Update timestamp but keep the was_alerted status
-            let was_alerted = *was_alerted;
-            cache.insert(hash, (now, was_alerted));
-            return false;
         }
 
-        // New event, record it
-        cache.insert(hash, (now, false));
+        // Record only failed/suspicious non-dangerous commands.
+        cache.insert(hash, now);
         false
     }
 
@@ -286,7 +301,7 @@ impl AlertDispatcher {
         }
 
         // 6. Check deduplication
-        if self.is_duplicate(&agent_name, &cmdline) {
+        if self.is_duplicate(event, &agent_name, &cmdline) {
             debug!(
                 process = %agent_name,
                 cmdline = %cmdline,
@@ -790,6 +805,74 @@ fn compute_event_hash(agent_name: &str, cmdline: &str) -> String {
     blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
+fn is_failed_or_suspicious_event(event: &SecurityEvent) -> bool {
+    if event.threat_level >= ThreatLevel::Orange {
+        return true;
+    }
+
+    if matches!(
+        event.event_type,
+        EventType::NetworkSuspicious
+            | EventType::CredentialAccess
+            | EventType::SelfTamper
+            | EventType::Persistence
+            | EventType::ContainerEscape
+            | EventType::VaultAccess
+            | EventType::PromptInjection
+    ) {
+        return true;
+    }
+
+    let narrative = event.narrative.to_ascii_lowercase();
+    let failure_markers = [
+        "failed",
+        "failure",
+        "error",
+        "denied",
+        "blocked",
+        "refused",
+        "timed out",
+        "timeout",
+        "non-zero",
+        "exit code",
+        "permission denied",
+    ];
+
+    failure_markers.iter().any(|marker| narrative.contains(marker))
+}
+
+fn is_non_deduplicable_dangerous_command(cmdline: &str) -> bool {
+    let lower = cmdline.to_ascii_lowercase();
+
+    let download_pipe_shell = (lower.contains("curl ")
+        || lower.contains("wget ")
+        || lower.contains("fetch ")
+        || lower.contains("http://")
+        || lower.contains("https://"))
+        && (lower.contains("| bash")
+            || lower.contains("| sh")
+            || lower.contains("| /bin/bash")
+            || lower.contains("| /bin/sh"));
+
+    let wget_pipe_shell = lower.contains("wget ")
+        && (lower.contains("-o - | sh")
+            || lower.contains("-o -|sh")
+            || lower.contains("-o- | sh")
+            || lower.contains("-o- |sh"));
+
+    let netcat_listener =
+        (lower.starts_with("nc ") || lower.contains(" nc ") || lower.starts_with("ncat "))
+            && lower.contains(" -l");
+
+    download_pipe_shell
+        || wget_pipe_shell
+        || netcat_listener
+        || lower.contains("base64 -d")
+        || lower.contains("base64 --decode")
+        || lower.contains(" eval ")
+        || lower.starts_with("eval ")
+}
+
 /// Formats duration for logging
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
@@ -807,7 +890,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::models::{EventType, ProcessInfo, SecurityEvent, ThreatLevel};
-    use std::time::{Duration, Instant};
     use tokio::sync::broadcast;
 
     fn sample_event() -> SecurityEvent {
@@ -902,5 +984,57 @@ mod tests {
 
         assert_eq!(hash1, hash2); // Same agent + same cmd = same hash
         assert_ne!(hash1, hash3); // Different agent = different hash
+    }
+
+    #[test]
+    fn deduplication_is_disabled_when_window_is_zero() {
+        let cfg = Config::default();
+        let (_tx, rx) = broadcast::channel(8);
+        let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+        let event = sample_event();
+
+        assert!(!dispatcher.is_duplicate(&event, "codex", "npm test"));
+        assert!(!dispatcher.is_duplicate(&event, "codex", "npm test"));
+    }
+
+    #[test]
+    fn dangerous_commands_are_never_deduplicated() {
+        let mut cfg = Config::default();
+        cfg.alerts.deduplication_enabled = true;
+        cfg.alerts.deduplication_hours = 24;
+
+        let (_tx, rx) = broadcast::channel(8);
+        let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+        let event = sample_event();
+        let cmd = "curl https://example.com/install.sh | bash";
+
+        assert!(!dispatcher.is_duplicate(&event, "codex", cmd));
+        assert!(!dispatcher.is_duplicate(&event, "codex", cmd));
+    }
+
+    #[test]
+    fn only_failed_or_suspicious_commands_are_tracked_for_dedup() {
+        let mut cfg = Config::default();
+        cfg.alerts.deduplication_enabled = true;
+        cfg.alerts.deduplication_hours = 24;
+
+        let (_tx, rx) = broadcast::channel(8);
+        let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+
+        let mut successful = sample_event();
+        successful.threat_level = ThreatLevel::Green;
+        successful.event_type = EventType::ProcessNew;
+        successful.narrative = "command completed successfully".to_string();
+
+        assert!(!dispatcher.is_duplicate(&successful, "codex", "npm test"));
+        assert!(!dispatcher.is_duplicate(&successful, "codex", "npm test"));
+
+        let mut failed = sample_event();
+        failed.threat_level = ThreatLevel::Green;
+        failed.event_type = EventType::ProcessNew;
+        failed.narrative = "command failed with exit code 1".to_string();
+
+        assert!(!dispatcher.is_duplicate(&failed, "codex", "npm test"));
+        assert!(dispatcher.is_duplicate(&failed, "codex", "npm test"));
     }
 }

@@ -38,3 +38,10 @@
 - [ ] macOS support
 - [ ] Web dashboard
 - [ ] More MITRE ATLAS mappings
+
+## Potential Enhancements (Future)
+- Apple Watch alerts via OpenClaw integration
+- iOS companion app for monitoring AI agents from phone
+- Voice integration ("Hey Siri, is Claude doing anything suspicious?")
+- Native iOS push notifications for critical alerts
+- Leash HTTP API endpoint for remote status queries

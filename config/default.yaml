@@ -58,8 +58,26 @@ response:
   stop_min_level: orange
 
 alerts:
-  min_severity: yellow
-  rate_limit_seconds: 60
+  min_severity: orange
+  rate_limit_seconds: 300
+  learning_mode_hours: 24
+  # known_good_commands: REMOVED - use baseline_learning instead
+
+  deduplication_enabled: false
+  deduplication_hours: 0  # Disabled
+  # BASELINE LEARNING - learns what's normal for each user/agent
+  baseline_learning_hours: 24
+  baseline_threshold: 3  # Commands seen < 3 times are outliers
+  
+  # CHEAP AI TRIAGE - analyze outliers with GLM before alerting
+  
+  # TRIAGE PROMPT - sent to cheap AI for outlier commands
+  triage_prompt: |
+    You are a security analyst. Analyze this AI agent command for suspicious behavior.
+    Command: {cmdline}
+    Agent: {agent}
+    Is this malicious? Reply YES or NO with one sentence of reasoning. by default - attackers could pre-whitelist malicious commands
+  first_process_minutes: 5
 
   slack:
     enabled: false
