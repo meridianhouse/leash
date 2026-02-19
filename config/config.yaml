@@ -1,0 +1,79 @@
+# Leash default configuration
+monitor_interval_ms: 1000
+
+# Local append-only JSONL alert log
+alert_log_path: ~/.local/state/leash/alerts.jsonl
+
+# Optional outgoing webhooks. Slack-style webhook payload uses {"text": "..."}
+# Discord webhook payload uses {"content": "..."}
+webhook_urls: []
+
+# AI tool process identifiers to watch
+ai_agents:
+  - claude
+  - codex
+  - gpt
+  - node
+
+# Legitimate parents for AI agents. If an AI agent is spawned by anything else,
+# sensitive-file access is elevated.
+legitimate_ai_parents:
+  - node
+  - npm
+  - bash
+  - zsh
+  - sh
+  - tmux
+  - screen
+  - systemd
+
+# Sensitive access keywords used against open file paths in /proc/<pid>/fd
+sensitive_path_keywords:
+  - .ssh
+  - .gnupg
+  - vault
+  - secret
+  - token
+  - credential
+  - .env
+  - shadow
+  - sudoers
+
+# File integrity monitor roots
+fim_paths:
+  - ~/.ssh
+  - ~/.config
+  - ~/.claude
+  - ~/.codex
+  - /etc/passwd
+  - /etc/shadow
+  - /etc/sudoers
+
+# Processes never frozen by response engine
+protected_processes:
+  - systemd
+  - sshd
+  - NetworkManager
+  - claude
+  - codex
+  - leash
+
+response:
+  # Explicit opt-in
+  enable_sigstop: false
+  stop_min_level: orange
+
+alerts:
+  min_level: yellow
+
+egress:
+  suspicious_ports:
+    - 4444
+    - 4445
+    - 5555
+    - 6666
+    - 7777
+    - 8888
+    - 9999
+    - 1337
+    - 31337
