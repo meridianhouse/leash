@@ -42,6 +42,20 @@ leash status
 leash stop
 ```
 
+## Docker
+
+Run Leash in a container with host namespace visibility:
+
+```bash
+docker compose up --build -d
+docker compose logs -f leash
+```
+
+Notes:
+- `pid: host` and `network_mode: host` are required for host-level process/network visibility.
+- `LEASH_PROC_ROOT=/host/proc` makes Leash read host `/proc` data from a bind mount.
+- Without host namespace settings, network telemetry is limited to the container namespace.
+
 ## What It Looks Like
 
 ```

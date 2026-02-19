@@ -3,10 +3,11 @@ use crate::mitre;
 use crate::models::{EventType, NetConnection, SecurityEvent, ThreatLevel};
 use nix::libc;
 use nu_ansi_term::Color;
-use procfs::process::FDTarget;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
+use std::fs;
 use std::net::Ipv4Addr;
+use std::path::Path;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use tracing::warn;
@@ -17,16 +18,27 @@ pub struct EgressMonitor {
     prev: HashSet<String>,
     dns_cache: HashMap<String, Option<String>>,
     known_services: HashMap<String, &'static str>,
+    proc_root: String,
+    proc_net_tcp_path: String,
+    running_in_container: bool,
+    warned_container_mode: bool,
 }
 
 impl EgressMonitor {
     pub fn new(cfg: Config, tx: broadcast::Sender<SecurityEvent>) -> Self {
+        let running_in_container = is_running_in_container();
+        let proc_root = detect_proc_root(running_in_container);
+        let proc_net_tcp_path = format!("{proc_root}/net/tcp");
         Self {
             cfg,
             tx,
             prev: HashSet::new(),
             dns_cache: HashMap::new(),
             known_services: known_services_map(),
+            proc_root,
+            proc_net_tcp_path,
+            running_in_container,
+            warned_container_mode: false,
         }
     }
 
@@ -38,11 +50,19 @@ impl EgressMonitor {
     }
 
     fn collect_once(&mut self) {
-        let inode_to_proc = inode_to_process();
-        let lines = match std::fs::read_to_string("/proc/net/tcp") {
+        if self.running_in_container && !self.warned_container_mode {
+            self.warned_container_mode = true;
+            warn!(
+                proc_root = %self.proc_root,
+                "running in container; network visibility is namespace-scoped unless host /proc is mounted"
+            );
+        }
+
+        let inode_to_proc = inode_to_process(&self.proc_root);
+        let lines = match fs::read_to_string(&self.proc_net_tcp_path) {
             Ok(v) => v,
             Err(err) => {
-                warn!(?err, "cannot read /proc/net/tcp");
+                warn!(?err, path = %self.proc_net_tcp_path, "cannot read proc net tcp file");
                 return;
             }
         };
@@ -321,36 +341,58 @@ fn parse_addr_port(raw: &str) -> Option<(String, u16)> {
     Some((addr, port))
 }
 
-fn inode_to_process() -> HashMap<u64, (i32, String, String)> {
+fn detect_proc_root(running_in_container: bool) -> String {
+    if let Ok(root) = std::env::var("LEASH_PROC_ROOT")
+        && !root.trim().is_empty()
+    {
+        return root;
+    }
+
+    if running_in_container && Path::new("/host/proc").exists() {
+        "/host/proc".to_string()
+    } else {
+        "/proc".to_string()
+    }
+}
+
+fn inode_to_process(proc_root: &str) -> HashMap<u64, (i32, String, String)> {
     let mut map: HashMap<u64, (i32, String, String)> = HashMap::new();
-    let all = match procfs::process::all_processes() {
+    let all = match fs::read_dir(proc_root) {
         Ok(v) => v,
         Err(_) => return map,
     };
 
-    for p in all {
-        let process = match p {
+    for entry in all {
+        let entry = match entry {
             Ok(proc) => proc,
             Err(_) => continue,
         };
-        let pid = process.pid;
-        let comm = process
-            .stat()
+        let pid = match entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<i32>()
             .ok()
-            .map(|s| s.comm)
-            .unwrap_or_else(String::new);
-        let cmdline = process
-            .cmdline()
+        {
+            Some(pid) => pid,
+            None => continue,
+        };
+        let proc_path = entry.path();
+        let comm = fs::read_to_string(proc_path.join("comm"))
             .ok()
-            .map(|parts| parts.join(" "))
+            .map(|raw| raw.trim().to_string())
             .unwrap_or_default();
-        let fds = match process.fd() {
+        let cmdline = read_cmdline(proc_path.join("cmdline"));
+        let fds = match fs::read_dir(proc_path.join("fd")) {
             Ok(fds) => fds,
             Err(_) => continue,
         };
 
         for fd in fds.flatten() {
-            if let FDTarget::Socket(inode) = fd.target {
+            let target = match fs::read_link(fd.path()) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            if let Some(inode) = parse_socket_inode(&target) {
                 map.entry(inode)
                     .or_insert((pid, comm.clone(), cmdline.clone()));
             }
@@ -358,6 +400,30 @@ fn inode_to_process() -> HashMap<u64, (i32, String, String)> {
     }
 
     map
+}
+
+fn read_cmdline(path: std::path::PathBuf) -> String {
+    let bytes = match fs::read(path) {
+        Ok(raw) => raw,
+        Err(_) => return String::new(),
+    };
+
+    bytes
+        .split(|byte| *byte == 0)
+        .filter_map(|part| {
+            if part.is_empty() {
+                return None;
+            }
+            std::str::from_utf8(part).ok()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_socket_inode(path: &Path) -> Option<u64> {
+    let raw = path.to_string_lossy();
+    let inode = raw.strip_prefix("socket:[")?.strip_suffix(']')?;
+    inode.parse::<u64>().ok()
 }
 
 fn format_hostname_suffix(hostname: &Option<String>) -> String {
@@ -411,6 +477,17 @@ fn reverse_dns_lookup(remote_addr: &str) -> Option<String> {
         .trim_end_matches('.')
         .to_ascii_lowercase();
     if host.is_empty() { None } else { Some(host) }
+}
+
+fn is_running_in_container() -> bool {
+    if Path::new("/.dockerenv").exists() {
+        return true;
+    }
+
+    let cgroup = fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
+    ["docker", "containerd", "kubepods", "podman", "lxc"]
+        .iter()
+        .any(|needle| cgroup.contains(needle))
 }
 
 #[cfg(test)]

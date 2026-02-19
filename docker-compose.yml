@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  leash:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: leash
+    privileged: true
+    pid: host
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      LEASH_PROC_ROOT: /host/proc
+      RUST_LOG: leash=info
+    volumes:
+      - /proc:/host/proc:ro
+      - ./config:/app/config:ro
+      - ./data:/data
+    command: ["watch", "--config", "/app/config/config.yaml"]
