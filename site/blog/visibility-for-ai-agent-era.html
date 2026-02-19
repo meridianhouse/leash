@@ -1,0 +1,115 @@
+# Leash: Visibility for the AI Agent Era
+
+*Published: February 19, 2026*
+
+---
+
+I've spent five years in endpoint security. Managing CrowdStrike deployments across thousands of endpoints. Watching threats, responding to incidents, building detection rules.
+
+When AI coding agents started running on my machine — Claude Code, Codex, Cursor — I realized something uncomfortable:
+
+**I had zero visibility into what they were actually doing.**
+
+They had access to my files. My terminal. My credentials. And I had no tooling to see what they touched.
+
+---
+
+## The Problem
+
+AI agents are incredible productivity tools. They write code, refactor monoliths, debug complex issues. But they run with real permissions on real machines.
+
+The current landscape:
+
+- **Enterprise EDR** (CrowdStrike, SentinelOne) — great for traditional threats, doesn't understand AI agent process patterns
+- **LLM Guardrails** (Lakera, Langfuse) — monitor API inputs/outputs, blind to OS-level activity
+- **Nothing** — for what AI agents actually do at the system level
+
+So I built Leash.
+
+---
+
+## What Leash Does
+
+Leash is an open-source AI agent visibility tool. It watches what AI agents do on your machine:
+
+- **Process Trees** — Track every process an agent spawns, and what those children spawn
+- **File Access** — Cryptographic (blake3) monitoring of sensitive files
+- **Network Egress** — Per-process outbound connections
+- **Credential Access** — Alerts when agents touch SSH keys, configs, secrets
+- **MITRE ATT&CK Mapping** — Every detection tagged with relevant techniques
+
+All in real-time. All observable. All logged.
+
+---
+
+## The Philosophy
+
+Leash is **observation-first**. Response actions (like SIGSTOP) exist but are opt-in and disabled by default.
+
+Why? Because visibility is more valuable than automated blocking. You should know what's happening before you decide what to do about it.
+
+This also means Leash is safe to run. It watches. It reports. It doesn't interfere unless you explicitly tell it to.
+
+---
+
+## Technical Architecture
+
+Leash is written in Rust for safety and performance:
+
+- **Async event bus** on Tokio for non-blocking detection
+- **Single binary** — 5.9MB, no runtime dependencies
+- **Multiple alerting channels** — Slack, Discord, Telegram, JSON log
+- **Plugin architecture** — easy to add new alert integrations
+
+v0.1 uses `/proc` polling. v0.2 will use eBPF via the `aya` crate for kernel-level, zero-overhead monitoring.
+
+---
+
+## MITRE ATT&CK Coverage
+
+Leash maps detections to both traditional ATT&CK and the new [MITRE ATLAS](https://atlas.mitre.org/) techniques specifically for AI systems:
+
+| Detection | Technique | ID |
+|-----------|-----------|-----|
+| Agent spawns shell | Command & Scripting Interpreter | T1059.004 |
+| Credential file access | Credentials in Files | T1552.001 |
+| SSH key access | Unsecured Credentials | T1552.004 |
+| Cron modification | Scheduled Task/Job | T1053.003 |
+| Sensitive file read | Data from Local System | T1005 |
+| Outbound connection | Exfiltration Over C2 | T1041 |
+| LLM prompt patterns | ATLAS: Prompt Injection | AML.T0054 |
+
+---
+
+## What's Next
+
+v0.2 will bring:
+
+- **eBPF kernel hooks** — zero-overhead monitoring via `aya`
+- **Anti-tamper watchdog** — mutual process monitoring to prevent bypass
+- **macOS support** — expanding beyond Linux
+- **Web dashboard** — historical analysis and visualization
+
+---
+
+## Try It Out
+
+```bash
+git clone https://github.com/meridianhouse/leash.git
+cd leash
+cargo build --release
+./target/release/leash init
+./target/release/leash watch
+```
+
+Or install from source and start watching in under a minute.
+
+---
+
+**Leash** — Put your AI on a short leash.
+
+Built by someone who got tired of not knowing what their AI agents were doing.
+
+---
+
+*Leash is MIT licensed. Built by Meridian House.*

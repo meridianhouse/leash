@@ -53,7 +53,10 @@ impl AlertDispatcher {
             }
 
             if self.cfg.alerts.discord.enabled && !self.cfg.alerts.discord.url.is_empty() {
-                if let Err(err) = self.send_discord(&self.cfg.alerts.discord.url, &event).await {
+                if let Err(err) = self
+                    .send_discord(&self.cfg.alerts.discord.url, &event)
+                    .await
+                {
                     warn!(?err, "discord delivery failed");
                 }
             }
