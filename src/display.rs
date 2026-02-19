@@ -44,7 +44,10 @@ pub fn render_watch_ui(
                 process.pid,
                 truncate(&process.exe, 50)
             );
-            println!("   tree: {}", format_process_tree(process));
+            println!("   tree:");
+            for line in format_process_tree_lines(process) {
+                println!("      {line}");
+            }
         }
         if let Some(file_event) = &event.file_event {
             println!("   path: {}", truncate(&file_event.path, 80));
@@ -72,15 +75,135 @@ fn color_for_level(level: ThreatLevel) -> AnsiString<'static> {
     }
 }
 
-fn format_process_tree(process: &ProcessInfo) -> String {
-    if process.parent_chain.is_empty() {
-        return format!("{}({})", process.name, process.pid);
+fn format_process_tree_lines(process: &ProcessInfo) -> Vec<String> {
+    let mut chain = process
+        .parent_chain
+        .iter()
+        .rev()
+        .map(|part| {
+            let (name, pid) = parse_chain_entry(part);
+            (name, pid, false)
+        })
+        .collect::<Vec<_>>();
+    chain.push((process.name.clone(), Some(process.pid), true));
+
+    if chain.is_empty() {
+        return vec!["unknown process".to_string()];
     }
 
-    let mut parts = process.parent_chain.clone();
-    parts.reverse();
-    parts.push(format!("{}({})", process.name, process.pid));
-    parts.join(" -> ")
+    let leaf_index = chain.len().saturating_sub(1);
+    chain
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, pid, is_leaf))| {
+            let display_name = color_process_name(name, *is_leaf, idx == 0, &process.cmdline);
+            let mut line = match pid {
+                Some(pid) => format!("{display_name} (pid:{pid})"),
+                None => display_name,
+            };
+
+            if *is_leaf && let Some(args) = extract_args(&process.cmdline) {
+                line.push_str(&format!(" args: {}", truncate(&args, 60)));
+            }
+
+            if idx == 0 {
+                line
+            } else {
+                let indent = "  ".repeat(idx - 1);
+                let branch = if idx == leaf_index { "└─ " } else { "├─ " };
+                format!("{indent}{branch}{line}")
+            }
+        })
+        .collect()
+}
+
+fn parse_chain_entry(raw: &str) -> (String, Option<i32>) {
+    if let Some((name, pid_part)) = raw.rsplit_once('(')
+        && let Some(pid_text) = pid_part.strip_suffix(')')
+        && let Ok(pid) = pid_text.parse::<i32>()
+    {
+        return (name.to_string(), Some(pid));
+    }
+
+    (raw.to_string(), None)
+}
+
+fn color_process_name(name: &str, is_leaf: bool, is_root: bool, cmdline: &str) -> String {
+    if is_root && is_ai_agent_name(name) {
+        return Color::Cyan.bold().paint(name).to_string();
+    }
+
+    if is_leaf && is_suspicious_command(name, cmdline) {
+        return Color::Red.bold().paint(name).to_string();
+    }
+
+    if is_suspicious_name(name) {
+        return Color::Red.bold().paint(name).to_string();
+    }
+
+    Style::new().bold().paint(name).to_string()
+}
+
+fn is_ai_agent_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "claude",
+        "codex",
+        "cursor",
+        "aider",
+        "cline",
+        "gpt",
+        "opencode",
+        "anthropic",
+    ]
+    .iter()
+    .any(|agent| lower.contains(agent))
+}
+
+fn is_suspicious_command(name: &str, cmdline: &str) -> bool {
+    is_suspicious_name(name) || is_suspicious_cmdline(cmdline)
+}
+
+fn is_suspicious_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["nc", "ncat", "netcat", "socat", "bash", "sh", "curl", "wget"]
+        .iter()
+        .any(|needle| lower == *needle || lower.contains(needle))
+}
+
+fn is_suspicious_cmdline(cmdline: &str) -> bool {
+    let lower = cmdline.to_ascii_lowercase();
+    [
+        "curl ",
+        "wget ",
+        "nc ",
+        "ncat ",
+        "netcat ",
+        "socat ",
+        "/dev/tcp/",
+        "bash -i",
+        "python -c",
+        "python3 -c",
+        "perl -e",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn extract_args(cmdline: &str) -> Option<String> {
+    let trimmed = cmdline.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let _ = parts.next()?;
+    let args = parts.collect::<Vec<_>>().join(" ");
+    if args.is_empty() {
+        None
+    } else {
+        Some(args)
+    }
 }
 
 fn truncate(value: &str, max_len: usize) -> String {
