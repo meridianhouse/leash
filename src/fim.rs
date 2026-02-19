@@ -43,15 +43,15 @@ impl FileIntegrityMonitor {
             }
         };
 
-        for raw in &self.cfg.fim_paths {
-            let path = PathBuf::from(raw);
+        let paths: Vec<PathBuf> = self.cfg.fim_paths.iter().map(PathBuf::from).collect();
+        for path in &paths {
             if !path.exists() {
                 continue;
             }
-            if let Err(err) = self.seed_baseline(&path) {
+            if let Err(err) = self.seed_baseline(path) {
                 warn!(?err, path = %path.display(), "failed to baseline path");
             }
-            if let Err(err) = watcher.watch(&path, RecursiveMode::Recursive) {
+            if let Err(err) = watcher.watch(path, RecursiveMode::Recursive) {
                 warn!(?err, path = %path.display(), "failed to watch path");
             }
         }

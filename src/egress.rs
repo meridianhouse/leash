@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, NetConnection, SecurityEvent, ThreatLevel};
-use procfs::process::{FDTarget, Process};
+use procfs::process::FDTarget;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
