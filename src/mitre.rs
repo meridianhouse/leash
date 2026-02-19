@@ -91,9 +91,47 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
 
     if combined.contains("chmod +x")
         || combined.contains("download_exec")
+        || combined.contains("download_exec_tmpdir")
         || combined.contains("write_sensitive_path")
     {
         add_technique(&mut event, "T1222.001");
+    }
+
+    if combined.contains("gatekeeper_bypass")
+        || combined.contains("xattr -c")
+        || combined.contains("xattr -d com.apple.quarantine")
+        || combined.contains("xattr -rd com.apple.quarantine")
+    {
+        add_technique(&mut event, "T1553.001");
+    }
+
+    if combined.contains("osascript_tmp_exec")
+        || combined.contains("osascript_inline_sensitive")
+        || combined.contains("osacompile_with_curl")
+        || combined.contains("osascript -e")
+        || combined.contains("osacompile")
+    {
+        add_technique(&mut event, "T1059.002");
+    }
+
+    if combined.contains("fileless_pipeline_decode")
+        || combined.contains("fileless_pipeline_python")
+        || combined.contains("exec_tmpdir")
+        || ((combined.contains("curl ") || combined.contains("http://") || combined.contains("https://"))
+            && (combined.contains("| python") || combined.contains("| python3")))
+    {
+        add_technique(&mut event, "T1059.004");
+    }
+
+    if combined.contains("launchd_persistence")
+        || combined.contains("/library/launchdaemons/")
+        || combined.contains("/library/launchagents/")
+    {
+        add_technique(&mut event, "T1543.001");
+    }
+
+    if combined.contains("kube_config_access") || combined.contains(".kube/config") {
+        add_technique(&mut event, "T1552.001");
     }
 
     let persistence_path = event
@@ -155,10 +193,15 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "AML.T0054" => ("ATLAS", "LLM Prompt Injection"),
         "AML.T0051" => ("ATLAS", "Model Evasion"),
         "T1059.004" => ("Execution", "Command and Scripting Interpreter: Unix Shell"),
+        "T1059.002" => ("Execution", "Command and Scripting Interpreter: AppleScript"),
         "T1059.006" => ("Execution", "Command and Scripting Interpreter: Python"),
         "T1552.001" => (
             "Credential Access",
             "Unsecured Credentials: Credentials In Files",
+        ),
+        "T1553.001" => (
+            "Defense Evasion",
+            "Subvert Trust Controls: Gatekeeper Bypass",
         ),
         "T1071.001" => (
             "Command and Control",
@@ -170,6 +213,7 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
             "Persistence",
             "Boot/Logon Autostart: systemd or cron modification",
         ),
+        "T1543.001" => ("Persistence", "Create or Modify System Process: Launch Agent"),
         "T1105" => ("Command and Control", "Ingress Tool Transfer"),
         "T1027" => (
             "Defense Evasion",
@@ -239,5 +283,35 @@ mod tests {
             "network".into(),
         ));
         assert!(has_technique_prefix(&network_event, "T1071"));
+    }
+
+    #[test]
+    fn gatekeeper_bypass_gets_t1553_mapping() {
+        let event = infer_and_tag(SecurityEvent::new(
+            EventType::NetworkSuspicious,
+            ThreatLevel::Orange,
+            "Dangerous command pattern(s) [gatekeeper_bypass]".into(),
+        ));
+        assert!(has_technique_prefix(&event, "T1553.001"));
+    }
+
+    #[test]
+    fn applescript_abuse_gets_t1059_002_mapping() {
+        let event = infer_and_tag(SecurityEvent::new(
+            EventType::NetworkSuspicious,
+            ThreatLevel::Orange,
+            "Dangerous command pattern(s) [osascript_inline_sensitive]".into(),
+        ));
+        assert!(has_technique_prefix(&event, "T1059.002"));
+    }
+
+    #[test]
+    fn launchd_persistence_gets_t1543_001_mapping() {
+        let event = infer_and_tag(SecurityEvent::new(
+            EventType::NetworkSuspicious,
+            ThreatLevel::Red,
+            "Dangerous command pattern(s) [launchd_persistence]".into(),
+        ));
+        assert!(has_technique_prefix(&event, "T1543.001"));
     }
 }

