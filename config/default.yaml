@@ -1,0 +1,92 @@
+# Leash Configuration
+# Put your AI on a short leash.
+# https://leash.meridianhouse.tech
+
+# AI agent process names to monitor
+# Leash tracks these processes and all their children
+monitored_agents:
+  - claude
+  - codex
+  - cursor
+  - gptools
+  - aider
+  - cline
+  - copilot-agent
+  - opencode
+  - pi
+
+# Legitimate parent processes for AI tools
+# If an AI tool is spawned by something NOT in this list,
+# it's flagged as suspicious (possible hijack)
+legitimate_parents:
+  - node
+  - npm
+  - npx
+  - bash
+  - zsh
+  - sh
+  - fish
+  - systemd
+  - tmux
+  - screen
+  - code       # VS Code
+  - cursor      # Cursor IDE
+
+# Sensitive paths - access to these triggers alerts
+sensitive_paths:
+  - ~/.ssh
+  - ~/.gnupg
+  - ~/.config/secrets
+  - ~/.aws
+  - ~/.kube
+  - /etc/shadow
+  - /etc/sudoers
+  - /etc/crontab
+  - /etc/passwd
+
+# File Integrity Monitoring
+# These paths are baselined on startup and monitored for changes
+fim_paths:
+  - /etc
+  - ~/.ssh
+  - ~/.config/leash
+
+# Scan interval (seconds) for process and network polling
+scan_interval_secs: 2
+
+# Response actions
+# WARNING: When enabled, Leash can SIGSTOP suspicious processes
+# Only enable if you understand the implications
+response:
+  enabled: false
+  action: alert_only  # alert_only | sigstop
+
+# Alert integrations
+alerts:
+  # Slack (incoming webhook)
+  slack:
+    enabled: false
+    webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+    # Only alert on these severity levels (green, yellow, orange, red)
+    min_severity: yellow
+
+  # Discord (webhook)
+  discord:
+    enabled: false
+    webhook_url: "https://discord.com/api/webhooks/YOUR/WEBHOOK"
+    min_severity: yellow
+
+  # Telegram (bot API)
+  telegram:
+    enabled: false
+    bot_token: "YOUR_BOT_TOKEN"
+    chat_id: "YOUR_CHAT_ID"
+    min_severity: yellow
+
+  # JSON log (always recommended)
+  json_log:
+    enabled: true
+    path: "~/.local/state/leash/alerts.jsonl"
+
+# Logging
+log_level: info  # trace, debug, info, warn, error

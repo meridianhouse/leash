@@ -1,25 +1,27 @@
 [Unit]
-Description=Leash - AI Agent Visibility Monitor
-Documentation=https://github.com/meridianhouse/leash
+Description=Leash - AI Agent Visibility
+Documentation=https://leash.meridianhouse.tech
 After=network.target
-StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/leash start --config /etc/leash/config.yaml
-ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/local/bin/leash start
+ExecStop=/usr/local/bin/leash stop
 Restart=always
-RestartSec=2
-StartLimitBurst=0
+RestartSec=3
 
-User=root
-Group=root
-NoNewPrivileges=yes
-PrivateTmp=yes
+# Security hardening
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/log/leash /run/leash
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/log/leash %h/.local/state/leash %h/.config/leash
+PrivateTmp=true
+NoNewPrivileges=false
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_KILL CAP_NET_ADMIN
+AmbientCapabilities=CAP_SYS_PTRACE
+
+# Resource limits
+MemoryMax=256M
+CPUQuota=25%
 
 [Install]
 WantedBy=multi-user.target
