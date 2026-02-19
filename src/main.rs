@@ -14,6 +14,7 @@ mod mitre;
 mod models;
 mod response;
 mod scan;
+mod stats;
 mod test_events;
 mod watchdog;
 

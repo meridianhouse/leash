@@ -7,6 +7,7 @@ use crate::fim::FileIntegrityMonitor;
 use crate::history;
 use crate::models::SecurityEvent;
 use crate::response::ResponseEngine;
+use crate::stats;
 use crate::test_events::build_test_events;
 use crate::watchdog::Watchdog;
 use nix::sys::signal::{self, Signal};
@@ -50,6 +51,8 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     let history_tx = event_tx.clone();
     let history_handle =
         tokio::spawn(async move { history::record_events(history_tx.subscribe()).await });
+    let stats_tx = event_tx.clone();
+    let stats_handle = tokio::spawn(async move { stats::track_events(stats_tx.subscribe()).await });
 
     let watch_handle = if watch_mode {
         Some(tokio::spawn(watch_events(
@@ -78,6 +81,7 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     response_handle.abort();
     watchdog_handle.abort();
     history_handle.abort();
+    stats_handle.abort();
     if let Some(handle) = watch_handle {
         handle.abort();
     }
@@ -134,15 +138,39 @@ pub fn print_status(json_output: bool) -> Result<(), DynError> {
     };
 
     if json_output {
+        let stats = stats::load_snapshot().ok().flatten();
         let value = serde_json::json!({
             "name": "Leash",
             "running": running,
             "pid_file": PID_FILE,
+            "stats": stats,
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if running {
         println!("{}", Color::Green.paint("Leash is running"));
+        if let Ok(Some(snapshot)) = stats::load_snapshot() {
+            println!("events/minute: {:.2}", snapshot.events_per_minute);
+            println!("total events: {}", snapshot.total_events);
+            if !snapshot.events_by_severity.is_empty() {
+                let severity_stats = snapshot
+                    .events_by_severity
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("by severity: {severity_stats}");
+            }
+            if !snapshot.events_by_type.is_empty() {
+                let type_stats = snapshot
+                    .events_by_type
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("by type: {type_stats}");
+            }
+        }
     } else {
         println!("{}", Color::Red.paint("Leash is stopped"));
     }
