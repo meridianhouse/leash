@@ -6,7 +6,6 @@ use tracing::warn;
 
 const MAX_DB_PAGES: usize = 131_072;
 const MAX_STORED_EVENTS: i64 = 200_000;
-const DEFAULT_MAX_HISTORY_MB: u64 = 100;
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct HistoryRecord {
@@ -117,10 +116,6 @@ fn open_db_at(path: &Path) -> anyhow::Result<Connection> {
 pub fn db_path() -> anyhow::Result<PathBuf> {
     let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set"))?;
     Ok(PathBuf::from(home).join(".local/share/leash/events.db"))
-}
-
-pub fn store_event(event: &SecurityEvent) -> anyhow::Result<()> {
-    store_event_with_limit(event, DEFAULT_MAX_HISTORY_MB)
 }
 
 pub fn store_event_with_limit(event: &SecurityEvent, max_history_mb: u64) -> anyhow::Result<()> {
@@ -377,6 +372,7 @@ fn is_sqlite_locked(err: &rusqlite::Error) -> bool {
 mod tests {
     use super::*;
     use crate::models::{EventType, SecurityEvent, ThreatLevel};
+    const TEST_MAX_HISTORY_MB: u64 = 100;
 
     fn temp_db_path(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -431,7 +427,7 @@ mod tests {
         let conn = open_db_at(&db_path).expect("open db");
 
         let event = sample_event(chrono::Utc::now(), ThreatLevel::Yellow, "insert me");
-        insert_event(&conn, &event, DEFAULT_MAX_HISTORY_MB).expect("insert event");
+        insert_event(&conn, &event, TEST_MAX_HISTORY_MB).expect("insert event");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(1) FROM events", [], |row| row.get(0))
@@ -457,8 +453,8 @@ mod tests {
             "recent event",
         );
 
-        insert_event(&conn, &old_event, DEFAULT_MAX_HISTORY_MB).expect("insert old");
-        insert_event(&conn, &recent_event, DEFAULT_MAX_HISTORY_MB).expect("insert recent");
+        insert_event(&conn, &old_event, TEST_MAX_HISTORY_MB).expect("insert old");
+        insert_event(&conn, &recent_event, TEST_MAX_HISTORY_MB).expect("insert recent");
 
         let rows = query_records(&conn, Some("24h"), None, None).expect("query records");
         assert_eq!(rows.len(), 1);
@@ -474,8 +470,8 @@ mod tests {
 
         let yellow_event = sample_event(chrono::Utc::now(), ThreatLevel::Yellow, "yellow event");
         let red_event = sample_event(chrono::Utc::now(), ThreatLevel::Red, "red event");
-        insert_event(&conn, &yellow_event, DEFAULT_MAX_HISTORY_MB).expect("insert yellow");
-        insert_event(&conn, &red_event, DEFAULT_MAX_HISTORY_MB).expect("insert red");
+        insert_event(&conn, &yellow_event, TEST_MAX_HISTORY_MB).expect("insert yellow");
+        insert_event(&conn, &red_event, TEST_MAX_HISTORY_MB).expect("insert red");
 
         let rows = query_records(&conn, None, Some("yellow"), None).expect("query severity");
         assert_eq!(rows.len(), 1);
@@ -508,7 +504,7 @@ mod tests {
                 ThreatLevel::Yellow,
                 &format!("event-{idx}"),
             );
-            insert_event(&conn, &event, DEFAULT_MAX_HISTORY_MB).expect("insert");
+            insert_event(&conn, &event, TEST_MAX_HISTORY_MB).expect("insert");
         }
 
         let deleted = prune_oldest_fraction(&conn, 0.10).expect("prune");
