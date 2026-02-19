@@ -1,8 +1,13 @@
 # 🐕 Leash
 
+[![CI](https://img.shields.io/badge/CI-placeholder-lightgrey)](#)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![crates.io](https://img.shields.io/badge/crates.io-placeholder-lightgrey)](#)
+
 **Put your AI on a short leash.**
 
 Leash is an open-source AI agent visibility tool. It monitors what AI agents (Claude Code, Codex, Cursor, GPT, etc.) actually do on your machine — every process spawned, file touched, network connection made, and credential accessed.
+Current footprint: **8,270 lines of Rust** and **212 tests**.
 
 > You gave an AI agent access to your terminal. Do you know what it's doing?
 
@@ -16,6 +21,7 @@ Leash fixes that.
 - 📁 **File Integrity Monitoring** — Know when files are created, modified, or deleted, with cryptographic verification
 - 🌐 **Network Egress Monitoring** — Track every outbound connection, per-process
 - 🔑 **Credential Access Detection** — Alerts when agents touch SSH keys, configs, secrets
+- 🛡️ **Self-Integrity Monitoring** — Detects tampering with the Leash binary and config
 - 🗺️ **MITRE ATT&CK Mapping** — Every detection tagged with relevant ATT&CK/ATLAS techniques
 - 🚨 **Real-time Alerts** — Slack, Discord, Telegram, or JSON log
 - ⚡ **Single Binary** — Drop it in, run it. No runtime dependencies.
@@ -168,6 +174,20 @@ Leash maps detections to MITRE ATT&CK and [ATLAS](https://atlas.mitre.org/) (AI-
 | Outbound connection | Exfiltration Over C2 | T1041 |
 | Config file modification | System Configuration | T1543 |
 
+## 25 Detection Rules
+
+Leash currently ships with 25 curated detection rules spanning process, credential access, persistence, and egress behaviors.
+
+| Category | Rule Count | Example Rules |
+|----------|------------|---------------|
+| Process and execution abuse | 8 | `curl_pipe_shell`, `osascript_tmp_execution`, `fileless_pipeline_python` |
+| Credential and secret access | 6 | `ai_agent_credential_access`, `kube_config_access`, `ssh_authorized_keys_modify` |
+| Persistence and defense evasion | 5 | `cron_persistence`, `launchd_persistence`, `gatekeeper_bypass` |
+| Supply chain and install-time abuse | 3 | `npm_postinstall_shell`, `package_install_external_ip`, `pyinstaller_network_child` |
+| Network and exfiltration signals | 3 | `raw_ip_download`, `tor_egress_port`, `known_exfil_service` |
+
+See `DETECTIONS.md` for full rule-level mappings and references.
+
 ## systemd
 
 ```bash
@@ -200,6 +220,13 @@ Requirements: Rust 1.75+, Linux (x86_64 or aarch64)
 ## Philosophy
 
 Leash is **observation-first**. It watches and reports. Response actions (like SIGSTOP) exist but are opt-in and disabled by default. We believe visibility is more valuable than automated blocking — you should know what's happening before you decide what to do about it.
+
+## Security
+
+- Security review 1: architecture and threat-model review
+- Security review 2: detection-rule evasion review
+- Security review 3: alert sink and secrets-handling review
+- Self-integrity monitoring continuously checks binary and config hash drift and raises tamper alerts
 
 ## License
 
