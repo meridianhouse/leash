@@ -51,9 +51,11 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     let alerts = AlertDispatcher::new(cfg.clone(), event_tx.subscribe())?;
     let response = ResponseEngine::new(cfg.clone(), event_tx.subscribe());
     let watchdog = Watchdog::new(cfg.clone(), event_tx.clone());
+    let max_history_mb = cfg.max_history_mb;
     let history_tx = event_tx.clone();
-    let history_handle =
-        tokio::spawn(async move { history::record_events(history_tx.subscribe()).await });
+    let history_handle = tokio::spawn(async move {
+        history::record_events(history_tx.subscribe(), max_history_mb).await
+    });
     let stats_tx = event_tx.clone();
     let stats_handle = tokio::spawn(async move { stats::track_events(stats_tx.subscribe()).await });
 
@@ -137,10 +139,12 @@ fn install_signal_handlers() -> Result<(), DynError> {
 
 pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynError> {
     let (event_tx, _) = broadcast::channel::<SecurityEvent>(64);
+    let max_history_mb = cfg.max_history_mb;
     let alerts = AlertDispatcher::new(cfg, event_tx.subscribe())?;
     let history_tx = event_tx.clone();
-    let history_handle =
-        tokio::spawn(async move { history::record_events(history_tx.subscribe()).await });
+    let history_handle = tokio::spawn(async move {
+        history::record_events(history_tx.subscribe(), max_history_mb).await
+    });
     let alerts_handle = tokio::spawn(async move { alerts.run().await });
 
     let started_at = chrono::Utc::now();

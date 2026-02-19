@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     #[serde(default = "default_monitor_interval_ms")]
     pub monitor_interval_ms: u64,
+    #[serde(default = "default_max_history_mb")]
+    pub max_history_mb: u64,
     #[serde(default = "default_ai_agents")]
     pub ai_agents: Vec<String>,
     #[serde(default = "default_legit_ai_parents")]
@@ -130,6 +132,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             monitor_interval_ms: default_monitor_interval_ms(),
+            max_history_mb: default_max_history_mb(),
             ai_agents: default_ai_agents(),
             legitimate_ai_parents: default_legit_ai_parents(),
             sensitive_path_keywords: default_sensitive_keywords(),
@@ -339,6 +342,10 @@ fn default_monitor_interval_ms() -> u64 {
 
 fn default_alert_log_path() -> String {
     "~/.local/state/leash/alerts.jsonl".into()
+}
+
+fn default_max_history_mb() -> u64 {
+    100
 }
 
 fn default_json_log_enabled() -> bool {
@@ -587,6 +594,7 @@ mod tests {
     fn config_with_all_fields_set_parses() {
         let yaml = r#"
 monitor_interval_ms: 250
+max_history_mb: 200
 ai_agents: [codex, claude]
 legitimate_ai_parents: [bash, tmux]
 sensitive_path_keywords: [token, secret]
@@ -625,6 +633,7 @@ egress:
 
         let parsed: Config = serde_yaml::from_str(yaml).expect("all-fields config should parse");
         assert_eq!(parsed.monitor_interval_ms, 250);
+        assert_eq!(parsed.max_history_mb, 200);
         assert_eq!(parsed.allow_list.len(), 1);
         assert_eq!(parsed.allow_list[0].name, "codex");
         assert_eq!(parsed.allow_list[0].reason, "approved local dev agent");

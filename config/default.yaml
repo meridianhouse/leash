@@ -2,6 +2,7 @@
 # Put your AI on a short leash.
 
 monitor_interval_ms: 1000
+max_history_mb: 100
 
 ai_agents:
   - claude

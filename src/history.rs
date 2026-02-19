@@ -6,6 +6,7 @@ use tracing::warn;
 
 const MAX_DB_PAGES: usize = 131_072;
 const MAX_STORED_EVENTS: i64 = 200_000;
+const DEFAULT_MAX_HISTORY_MB: u64 = 100;
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct HistoryRecord {
@@ -25,11 +26,14 @@ struct StoredEvent {
     payload_json: String,
 }
 
-pub async fn record_events(mut rx: broadcast::Receiver<SecurityEvent>) -> anyhow::Result<()> {
+pub async fn record_events(
+    mut rx: broadcast::Receiver<SecurityEvent>,
+    max_history_mb: u64,
+) -> anyhow::Result<()> {
     loop {
         match rx.recv().await {
             Ok(event) => {
-                if let Err(err) = store_event(&event) {
+                if let Err(err) = store_event_with_limit(&event, max_history_mb) {
                     warn!(?err, "failed to write event history");
                 }
             }
@@ -116,11 +120,16 @@ pub fn db_path() -> anyhow::Result<PathBuf> {
 }
 
 pub fn store_event(event: &SecurityEvent) -> anyhow::Result<()> {
-    let conn = open_db()?;
-    insert_event(&conn, event)
+    store_event_with_limit(event, DEFAULT_MAX_HISTORY_MB)
 }
 
-fn insert_event(conn: &Connection, event: &SecurityEvent) -> anyhow::Result<()> {
+pub fn store_event_with_limit(event: &SecurityEvent, max_history_mb: u64) -> anyhow::Result<()> {
+    let conn = open_db()?;
+    insert_event(&conn, event, max_history_mb)
+}
+
+fn insert_event(conn: &Connection, event: &SecurityEvent, max_history_mb: u64) -> anyhow::Result<()> {
+    enforce_db_size_limit(conn, max_history_mb)?;
     let db_file = db_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
@@ -138,6 +147,53 @@ fn insert_event(conn: &Connection, event: &SecurityEvent) -> anyhow::Result<()> 
     .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "insert event"))?;
     prune_old_events(conn)?;
     Ok(())
+}
+
+fn enforce_db_size_limit(conn: &Connection, max_history_mb: u64) -> anyhow::Result<()> {
+    let path = db_path()?;
+    let max_bytes = max_history_mb.saturating_mul(1024 * 1024);
+    if max_bytes == 0 {
+        return Ok(());
+    }
+
+    let size_bytes = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return Ok(()),
+    };
+    if size_bytes < max_bytes {
+        return Ok(());
+    }
+
+    let pruned = prune_oldest_fraction(conn, 0.10)?;
+    if pruned > 0 {
+        warn!(
+            pruned_events = pruned,
+            db_size_bytes = size_bytes,
+            db_limit_bytes = max_bytes,
+            "history database limit reached; pruned oldest events"
+        );
+    }
+    Ok(())
+}
+
+fn prune_oldest_fraction(conn: &Connection, fraction: f64) -> anyhow::Result<usize> {
+    let total_events: i64 = conn.query_row("SELECT COUNT(1) FROM events", [], |row| row.get(0))?;
+    if total_events <= 0 {
+        return Ok(0);
+    }
+    let prune_count = ((total_events as f64) * fraction).ceil() as i64;
+    let prune_count = prune_count.max(1);
+
+    let deleted = conn.execute(
+        "DELETE FROM events
+         WHERE id IN (
+             SELECT id FROM events
+             ORDER BY id ASC
+             LIMIT ?1
+         )",
+        params![prune_count],
+    )?;
+    Ok(deleted)
 }
 
 fn prune_old_events(conn: &Connection) -> anyhow::Result<()> {
@@ -375,7 +431,7 @@ mod tests {
         let conn = open_db_at(&db_path).expect("open db");
 
         let event = sample_event(chrono::Utc::now(), ThreatLevel::Yellow, "insert me");
-        insert_event(&conn, &event).expect("insert event");
+        insert_event(&conn, &event, DEFAULT_MAX_HISTORY_MB).expect("insert event");
 
         let count: i64 = conn
             .query_row("SELECT COUNT(1) FROM events", [], |row| row.get(0))
@@ -401,8 +457,8 @@ mod tests {
             "recent event",
         );
 
-        insert_event(&conn, &old_event).expect("insert old");
-        insert_event(&conn, &recent_event).expect("insert recent");
+        insert_event(&conn, &old_event, DEFAULT_MAX_HISTORY_MB).expect("insert old");
+        insert_event(&conn, &recent_event, DEFAULT_MAX_HISTORY_MB).expect("insert recent");
 
         let rows = query_records(&conn, Some("24h"), None, None).expect("query records");
         assert_eq!(rows.len(), 1);
@@ -418,8 +474,8 @@ mod tests {
 
         let yellow_event = sample_event(chrono::Utc::now(), ThreatLevel::Yellow, "yellow event");
         let red_event = sample_event(chrono::Utc::now(), ThreatLevel::Red, "red event");
-        insert_event(&conn, &yellow_event).expect("insert yellow");
-        insert_event(&conn, &red_event).expect("insert red");
+        insert_event(&conn, &yellow_event, DEFAULT_MAX_HISTORY_MB).expect("insert yellow");
+        insert_event(&conn, &red_event, DEFAULT_MAX_HISTORY_MB).expect("insert red");
 
         let rows = query_records(&conn, None, Some("yellow"), None).expect("query severity");
         assert_eq!(rows.len(), 1);
@@ -439,5 +495,30 @@ mod tests {
         assert!(msg.contains("SQLite DB is locked"));
         assert!(msg.contains("/tmp/leash.db"));
         assert!(msg.contains("other running Leash instances"));
+    }
+
+    #[test]
+    fn prune_oldest_fraction_removes_ten_percent() {
+        let db_path = temp_db_path("prune-fraction");
+        let conn = open_db_at(&db_path).expect("open db");
+
+        for idx in 0..20 {
+            let event = sample_event(
+                chrono::Utc::now() + chrono::Duration::seconds(idx),
+                ThreatLevel::Yellow,
+                &format!("event-{idx}"),
+            );
+            insert_event(&conn, &event, DEFAULT_MAX_HISTORY_MB).expect("insert");
+        }
+
+        let deleted = prune_oldest_fraction(&conn, 0.10).expect("prune");
+        assert_eq!(deleted, 2);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(1) FROM events", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 18);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }
