@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leash — Put your AI on a short leash</title>
+    <meta name="description" content="Open-source AI agent visibility tool. Monitor what AI agents do on your machine — every process, file, and network connection.">
+    <meta property="og:title" content="Leash — AI Agent Visibility">
+    <meta property="og:description" content="Know what your AI agents are doing. Process monitoring, file access tracking, network egress detection. Open source.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://leash.meridianhouse.tech">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --border: #1e1e2e;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --accent: #6366f1;
+            --green: #22c55e;
+            --yellow: #eab308;
+            --orange: #f97316;
+            --red: #ef4444;
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Hero */
+        .hero {
+            padding: 80px 0 60px;
+            text-align: center;
+        }
+
+        .hero-emoji {
+            font-size: 64px;
+            margin-bottom: 24px;
+        }
+
+        h1 {
+            font-size: 3.5rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            margin-bottom: 16px;
+        }
+
+        h1 span {
+            background: linear-gradient(135deg, var(--accent), #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .tagline {
+            font-size: 1.4rem;
+            color: var(--text-dim);
+            margin-bottom: 40px;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .cta-group {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 28px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #4f46e5;
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--accent);
+        }
+
+        /* Terminal Demo */
+        .terminal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin: 60px 0;
+            overflow: hidden;
+        }
+
+        .terminal-bar {
+            background: #1a1a2e;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .terminal-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .terminal-dot.red { background: var(--red); }
+        .terminal-dot.yellow { background: var(--yellow); }
+        .terminal-dot.green { background: var(--green); }
+
+        .terminal-title {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            margin-left: 8px;
+        }
+
+        .terminal-body {
+            padding: 24px;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+
+        .t-green { color: var(--green); }
+        .t-yellow { color: var(--yellow); }
+        .t-orange { color: var(--orange); }
+        .t-red { color: var(--red); }
+        .t-dim { color: var(--text-dim); }
+        .t-accent { color: var(--accent); }
+
+        /* Features */
+        .features {
+            padding: 60px 0;
+        }
+
+        .features h2 {
+            font-size: 2rem;
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 24px;
+        }
+
+        .feature-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 28px;
+        }
+
+        .feature-card .icon {
+            font-size: 1.5rem;
+            margin-bottom: 12px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.1rem;
+            margin-bottom: 8px;
+        }
+
+        .feature-card p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        /* Install */
+        .install {
+            padding: 60px 0;
+            text-align: center;
+        }
+
+        .install h2 {
+            font-size: 2rem;
+            margin-bottom: 24px;
+        }
+
+        .install-code {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px 28px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            display: inline-block;
+            text-align: left;
+        }
+
+        /* MITRE */
+        .mitre {
+            padding: 60px 0;
+        }
+
+        .mitre h2 {
+            font-size: 2rem;
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
+        .mitre-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--surface);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .mitre-table th {
+            background: #1a1a2e;
+            padding: 14px 20px;
+            text-align: left;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+        }
+
+        .mitre-table td {
+            padding: 12px 20px;
+            border-top: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+
+        .mitre-table code {
+            background: rgba(99, 102, 241, 0.15);
+            color: var(--accent);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+
+        /* Footer */
+        footer {
+            padding: 48px 0;
+            text-align: center;
+            color: var(--text-dim);
+            border-top: 1px solid var(--border);
+            margin-top: 60px;
+        }
+
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 600px) {
+            h1 { font-size: 2.2rem; }
+            .tagline { font-size: 1.1rem; }
+            .terminal-body { font-size: 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <section class="hero">
+        <div class="hero-emoji">🐕</div>
+        <h1><span>Leash</span></h1>
+        <p class="tagline">Put your AI on a short leash. Know what your AI agents are doing on your machine — every process, file, and network connection.</p>
+        <div class="cta-group">
+            <a href="https://github.com/meridianhouse/leash" class="btn btn-primary">
+                ⭐ View on GitHub
+            </a>
+            <a href="#install" class="btn btn-secondary">
+                Quick Install →
+            </a>
+        </div>
+    </section>
+
+    <div class="terminal">
+        <div class="terminal-bar">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <span class="terminal-title">leash watch</span>
+        </div>
+        <div class="terminal-body">
+            <div class="t-dim">🐕 Leash v0.1.0 — AI Agent Visibility</div>
+            <div class="t-dim">Monitoring: claude, codex, cursor, aider, cline</div>
+            <br>
+            <div><span class="t-green">🟢</span> <span class="t-dim">[process_spawn]</span> claude<span class="t-dim">(pid:4521)</span> → bash<span class="t-dim">(pid:4522)</span></div>
+            <div><span class="t-green">🟢</span> <span class="t-dim">[process_spawn]</span> bash<span class="t-dim">(pid:4522)</span> → git<span class="t-dim">(pid:4523)</span> args: status</div>
+            <div><span class="t-yellow">🟡</span> <span class="t-dim">[file_access]</span> bash<span class="t-dim">(pid:4522)</span> read <span class="t-accent">~/.ssh/config</span></div>
+            <div><span class="t-orange">🟠</span> <span class="t-dim">[credential]</span> claude<span class="t-dim">(pid:4521)</span> accessed <span class="t-accent">~/.config/secrets/</span></div>
+            <div><span class="t-green">🟢</span> <span class="t-dim">[network]</span> node<span class="t-dim">(pid:4525)</span> → api.anthropic.com:443</div>
+            <div><span class="t-red">🔴</span> <span class="t-dim">[file_modify]</span> bash<span class="t-dim">(pid:4522)</span> modified <span class="t-accent">/etc/crontab</span></div>
+            <div class="t-dim">    ╰─ MITRE: T1053.003 (Scheduled Task/Job: Cron)</div>
+            <div><span class="t-orange">🟠</span> <span class="t-dim">[egress]</span> node<span class="t-dim">(pid:4525)</span> → <span class="t-red">185.42.170.1:443</span> <span class="t-dim">(unknown destination)</span></div>
+        </div>
+    </div>
+
+    <section class="features">
+        <h2>What Leash Watches</h2>
+        <div class="feature-grid">
+            <div class="feature-card">
+                <div class="icon">🔍</div>
+                <h3>Process Trees</h3>
+                <p>Track every process an AI agent spawns, and what those child processes do. Full ancestry chain.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">📁</div>
+                <h3>File Integrity</h3>
+                <p>Cryptographic (blake3) monitoring of sensitive files. Know when configs, keys, or system files change.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">🌐</div>
+                <h3>Network Egress</h3>
+                <p>Per-process outbound connection tracking. See exactly where your data is going.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">🔑</div>
+                <h3>Credential Access</h3>
+                <p>Alerts when agents touch SSH keys, AWS configs, secrets vaults, or sensitive system files.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">🗺️</div>
+                <h3>MITRE ATT&CK</h3>
+                <p>Every detection mapped to ATT&CK and ATLAS techniques. Speak the language security teams already know.</p>
+            </div>
+            <div class="feature-card">
+                <div class="icon">🚨</div>
+                <h3>Instant Alerts</h3>
+                <p>Slack, Discord, Telegram, or JSON log. Rich formatted alerts the moment something happens.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="install" id="install">
+        <h2>Get Started in 30 Seconds</h2>
+        <div class="install-code">
+            <div class="t-dim"># Clone and build</div>
+            <div>git clone https://github.com/meridianhouse/leash.git</div>
+            <div>cd leash && cargo build --release</div>
+            <br>
+            <div class="t-dim"># Generate config and start watching</div>
+            <div>./target/release/leash init</div>
+            <div>./target/release/leash watch</div>
+        </div>
+    </section>
+
+    <section class="mitre">
+        <h2>Detection Coverage</h2>
+        <table class="mitre-table">
+            <thead>
+                <tr>
+                    <th>Detection</th>
+                    <th>MITRE Technique</th>
+                    <th>ID</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>AI agent spawns shell</td>
+                    <td>Command & Scripting Interpreter</td>
+                    <td><code>T1059.004</code></td>
+                </tr>
+                <tr>
+                    <td>Credential file access</td>
+                    <td>Credentials in Files</td>
+                    <td><code>T1552.001</code></td>
+                </tr>
+                <tr>
+                    <td>SSH key access</td>
+                    <td>Unsecured Credentials</td>
+                    <td><code>T1552.004</code></td>
+                </tr>
+                <tr>
+                    <td>Cron modification</td>
+                    <td>Scheduled Task/Job</td>
+                    <td><code>T1053.003</code></td>
+                </tr>
+                <tr>
+                    <td>Sensitive file read</td>
+                    <td>Data from Local System</td>
+                    <td><code>T1005</code></td>
+                </tr>
+                <tr>
+                    <td>Outbound connection</td>
+                    <td>Exfiltration Over C2</td>
+                    <td><code>T1041</code></td>
+                </tr>
+                <tr>
+                    <td>Config modification</td>
+                    <td>System Services</td>
+                    <td><code>T1543</code></td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+</div>
+
+<footer>
+    <div class="container">
+        <p>Built by <a href="https://meridianhouse.tech">Meridian House</a> · <a href="https://github.com/meridianhouse/leash">GitHub</a> · MIT License</p>
+        <p style="margin-top: 8px; font-size: 0.85rem;">Built by security professionals who got tired of not knowing what their AI agents were doing.</p>
+    </div>
+</footer>
+
+</body>
+</html>
