@@ -320,21 +320,32 @@ impl ProcessCollector {
     fn read_process(&self, proc: &Process) -> Option<ProcessSnapshot> {
         let stat = proc.stat().ok()?;
         let pid = stat.pid;
-        let cmdline = proc.cmdline().ok().map(|v| v.join(" ")).unwrap_or_default();
-        let exe = proc
+        let raw_cmdline = proc.cmdline().ok().map(|v| v.join(" ")).unwrap_or_default();
+        let raw_exe = proc
             .exe()
             .ok()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let cwd = proc
+        let raw_cwd = proc
             .cwd()
             .ok()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let open_fds = self.read_open_fds(pid);
-        let env = self.read_env_of_interest(pid);
+        let raw_open_fds = self.read_open_fds(pid);
+        let raw_env = self.read_env_of_interest(pid);
         let (memory_rss_kb, memory_vmsize_kb, username) = self.read_status_fields(pid);
-        let is_ai_agent = self.is_ai_agent(&stat.comm, &cmdline, &exe);
+        let is_ai_agent = self.is_ai_agent(&stat.comm, &raw_cmdline, &raw_exe);
+        let cmdline = scrub_secrets(&raw_cmdline);
+        let exe = scrub_secrets(&raw_exe);
+        let cwd = scrub_secrets(&raw_cwd);
+        let open_fds = raw_open_fds
+            .into_iter()
+            .map(|path| scrub_secrets(&path))
+            .collect::<Vec<_>>();
+        let env = raw_env
+            .into_iter()
+            .map(|(key, value)| (key, scrub_secrets(&value)))
+            .collect::<HashMap<_, _>>();
 
         let info = ProcessInfo {
             pid,
@@ -483,6 +494,114 @@ impl ProcessCollector {
 
 fn parse_status_kb(raw: &str) -> Option<u64> {
     raw.split_whitespace().next()?.parse::<u64>().ok()
+}
+
+pub fn scrub_secrets(input: &str) -> String {
+    let mut output = redact_prefixed_alnum_secret(input, "sk-", 20);
+    for prefix in ["AKIA", "ABIA", "ACCA", "ASIA"] {
+        output = redact_fixed_alnum_secret(&output, prefix, 16);
+    }
+    redact_assignment_secrets(&output)
+}
+
+fn redact_prefixed_alnum_secret(input: &str, prefix: &str, min_tail_len: usize) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        let Some(found) = input[idx..].find(prefix) else {
+            output.push_str(&input[idx..]);
+            break;
+        };
+        let start = idx + found;
+        output.push_str(&input[idx..start]);
+
+        let tail_start = start + prefix.len();
+        let tail_len = input[tail_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric())
+            .count();
+        if tail_len >= min_tail_len {
+            output.push_str("[REDACTED]");
+            idx = tail_start + tail_len;
+        } else {
+            output.push_str(prefix);
+            idx = tail_start;
+        }
+    }
+    output
+}
+
+fn redact_fixed_alnum_secret(input: &str, prefix: &str, tail_len: usize) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        let Some(found) = input[idx..].find(prefix) else {
+            output.push_str(&input[idx..]);
+            break;
+        };
+        let start = idx + found;
+        output.push_str(&input[idx..start]);
+
+        let secret_start = start + prefix.len();
+        let tail = input[secret_start..].chars().take(tail_len).collect::<String>();
+        if tail.chars().count() == tail_len
+            && tail
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        {
+            output.push_str("[REDACTED]");
+            idx = secret_start + tail_len;
+        } else {
+            output.push_str(prefix);
+            idx = secret_start;
+        }
+    }
+    output
+}
+
+fn redact_assignment_secrets(input: &str) -> String {
+    let keys = ["api_key", "secret", "token", "password"];
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        let current = input[idx..].chars().next().unwrap_or_default();
+        if current.is_ascii_alphabetic() {
+            let key_start = idx;
+            while idx < input.len() {
+                let ch = input[idx..].chars().next().unwrap_or_default();
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    idx += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let key = &input[key_start..idx];
+            if idx < input.len()
+                && input[idx..].starts_with('=')
+                && keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+            {
+                output.push_str(key);
+                output.push('=');
+                idx += 1;
+                while idx < input.len() {
+                    let ch = input[idx..].chars().next().unwrap_or_default();
+                    if ch.is_ascii_whitespace() || ch == '&' {
+                        break;
+                    }
+                    idx += ch.len_utf8();
+                }
+                output.push_str("[REDACTED]");
+                continue;
+            }
+            output.push_str(key);
+            continue;
+        }
+
+        output.push(current);
+        idx += current.len_utf8();
+    }
+
+    output
 }
 
 fn extract_url(cmdline: &str) -> Option<String> {
@@ -679,6 +798,7 @@ fn normalize_exec_token(input: &str) -> String {
 mod tests {
     use super::ProcessCollector;
     use super::detect_dangerous_commands;
+    use super::scrub_secrets;
     use crate::config::Config;
     use crate::models::SecurityEvent;
     use tokio::sync::broadcast;
@@ -773,5 +893,15 @@ mod tests {
                 .match_allow_list("sshd", "sshd: ryan", "/usr/sbin/sshd")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn scrub_secrets_redacts_known_patterns() {
+        let input = "sk-abcdefghijklmnopqrstuvwxyz12345 AKIAABCDEFGHIJKLMNOP api_key=abc123";
+        let output = scrub_secrets(input);
+        assert!(!output.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+        assert!(!output.contains("AKIAABCDEFGHIJKLMNOP"));
+        assert!(!output.contains("api_key=abc123"));
+        assert!(output.contains("[REDACTED]"));
     }
 }

@@ -41,9 +41,10 @@ impl AlertDispatcher {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
+            let scrubbed_event = scrub_event(&event);
 
             if self.cfg.alerts.json_log.enabled
-                && let Err(err) = self.write_local_log(&event)
+                && let Err(err) = self.write_local_log(&scrubbed_event)
             {
                 error!(?err, "failed to write alert log");
             }
@@ -63,7 +64,9 @@ impl AlertDispatcher {
 
             if self.cfg.alerts.slack.enabled
                 && !self.cfg.alerts.slack.url.is_empty()
-                && let Err(err) = self.send_slack(&self.cfg.alerts.slack.url, &event).await
+                && let Err(err) = self
+                    .send_slack(&self.cfg.alerts.slack.url, &scrubbed_event)
+                    .await
             {
                 warn!(?err, "slack delivery failed");
             }
@@ -71,7 +74,7 @@ impl AlertDispatcher {
             if self.cfg.alerts.discord.enabled
                 && !self.cfg.alerts.discord.url.is_empty()
                 && let Err(err) = self
-                    .send_discord(&self.cfg.alerts.discord.url, &event)
+                    .send_discord(&self.cfg.alerts.discord.url, &scrubbed_event)
                     .await
             {
                 warn!(?err, "discord delivery failed");
@@ -80,7 +83,7 @@ impl AlertDispatcher {
             if self.cfg.alerts.telegram.enabled
                 && !self.cfg.alerts.telegram.token.is_empty()
                 && !self.cfg.alerts.telegram.chat_id.is_empty()
-                && let Err(err) = self.send_telegram(&event).await
+                && let Err(err) = self.send_telegram(&scrubbed_event).await
             {
                 warn!(?err, "telegram delivery failed");
             }
@@ -182,7 +185,7 @@ fn event_details(event: &SecurityEvent) -> EventDetails {
     let process = event
         .process
         .as_ref()
-        .map(|p| p.name.clone())
+        .map(|p| scrub_secrets(&p.name))
         .unwrap_or_else(|| "-".into());
     let pid = event
         .process
@@ -192,8 +195,8 @@ fn event_details(event: &SecurityEvent) -> EventDetails {
     let path = event
         .file_event
         .as_ref()
-        .map(|f| f.path.clone())
-        .or_else(|| event.process.as_ref().map(|p| p.exe.clone()))
+        .map(|f| scrub_secrets(&f.path))
+        .or_else(|| event.process.as_ref().map(|p| scrub_secrets(&p.exe)))
         .unwrap_or_else(|| "-".into());
     let mitre_id = event
         .mitre
@@ -361,6 +364,159 @@ fn escape_html(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn scrub_event(event: &SecurityEvent) -> SecurityEvent {
+    let mut out = event.clone();
+    out.narrative = scrub_secrets(&out.narrative);
+    out.allowed_reason = out.allowed_reason.as_ref().map(|v| scrub_secrets(v));
+
+    if let Some(process) = out.process.as_mut() {
+        process.name = scrub_secrets(&process.name);
+        process.cmdline = scrub_secrets(&process.cmdline);
+        process.exe = scrub_secrets(&process.exe);
+        process.cwd = scrub_secrets(&process.cwd);
+        process.open_files = process
+            .open_files
+            .iter()
+            .map(|path| scrub_secrets(path))
+            .collect();
+        process.parent_chain = process
+            .parent_chain
+            .iter()
+            .map(|entry| scrub_secrets(entry))
+            .collect();
+    }
+
+    if let Some(file_event) = out.file_event.as_mut() {
+        file_event.path = scrub_secrets(&file_event.path);
+    }
+
+    if let Some(enrichment) = out.enrichment.as_mut() {
+        enrichment.full_cmdline = scrub_secrets(&enrichment.full_cmdline);
+        enrichment.working_dir = scrub_secrets(&enrichment.working_dir);
+        enrichment.open_fds = enrichment
+            .open_fds
+            .iter()
+            .map(|path| scrub_secrets(path))
+            .collect();
+        enrichment.env = enrichment
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), scrub_secrets(v)))
+            .collect();
+    }
+
+    out
+}
+
+pub fn scrub_secrets(input: &str) -> String {
+    let mut output = redact_prefixed_alnum_secret(input, "sk-", 20);
+    for prefix in ["AKIA", "ABIA", "ACCA", "ASIA"] {
+        output = redact_fixed_alnum_secret(&output, prefix, 16);
+    }
+    redact_assignment_secrets(&output)
+}
+
+fn redact_prefixed_alnum_secret(input: &str, prefix: &str, min_tail_len: usize) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        let Some(found) = input[idx..].find(prefix) else {
+            output.push_str(&input[idx..]);
+            break;
+        };
+        let start = idx + found;
+        output.push_str(&input[idx..start]);
+
+        let tail_start = start + prefix.len();
+        let tail_len = input[tail_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric())
+            .count();
+        if tail_len >= min_tail_len {
+            output.push_str("[REDACTED]");
+            idx = tail_start + tail_len;
+        } else {
+            output.push_str(prefix);
+            idx = tail_start;
+        }
+    }
+    output
+}
+
+fn redact_fixed_alnum_secret(input: &str, prefix: &str, tail_len: usize) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        let Some(found) = input[idx..].find(prefix) else {
+            output.push_str(&input[idx..]);
+            break;
+        };
+        let start = idx + found;
+        output.push_str(&input[idx..start]);
+
+        let secret_start = start + prefix.len();
+        let tail = input[secret_start..].chars().take(tail_len).collect::<String>();
+        if tail.chars().count() == tail_len
+            && tail
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        {
+            output.push_str("[REDACTED]");
+            idx = secret_start + tail_len;
+        } else {
+            output.push_str(prefix);
+            idx = secret_start;
+        }
+    }
+    output
+}
+
+fn redact_assignment_secrets(input: &str) -> String {
+    let keys = ["api_key", "secret", "token", "password"];
+    let mut output = String::with_capacity(input.len());
+    let mut idx = 0;
+
+    while idx < input.len() {
+        let current = input[idx..].chars().next().unwrap_or_default();
+        if current.is_ascii_alphabetic() {
+            let key_start = idx;
+            while idx < input.len() {
+                let ch = input[idx..].chars().next().unwrap_or_default();
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    idx += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let key = &input[key_start..idx];
+            if idx < input.len()
+                && input[idx..].starts_with('=')
+                && keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate))
+            {
+                output.push_str(key);
+                output.push('=');
+                idx += 1;
+                while idx < input.len() {
+                    let ch = input[idx..].chars().next().unwrap_or_default();
+                    if ch.is_ascii_whitespace() || ch == '&' {
+                        break;
+                    }
+                    idx += ch.len_utf8();
+                }
+                output.push_str("[REDACTED]");
+                continue;
+            }
+            output.push_str(key);
+            continue;
+        }
+
+        output.push(current);
+        idx += current.len_utf8();
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +623,15 @@ mod tests {
         );
 
         assert!(dispatcher.should_send_for_event_type(&event));
+    }
+
+    #[test]
+    fn scrub_secrets_redacts_known_patterns() {
+        let input = "token=shhh sk-abcdefghijklmnopqrstuvwxyz12345 AKIAABCDEFGHIJKLMNOP";
+        let output = scrub_secrets(input);
+        assert!(!output.contains("token=shhh"));
+        assert!(!output.contains("AKIAABCDEFGHIJKLMNOP"));
+        assert!(!output.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
+        assert!(output.contains("[REDACTED]"));
     }
 }
