@@ -2,18 +2,30 @@ use crate::models::{SecurityEvent, ThreatLevel};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use tracing::warn;
 
 const STATS_FILE: &str = "/tmp/leash-stats.json";
+static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsSnapshot {
     pub events_per_minute: f64,
     pub total_events: u64,
+    #[serde(default)]
+    pub dropped_events: u64,
     pub events_by_severity: BTreeMap<String, u64>,
     pub events_by_type: BTreeMap<String, u64>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn record_dropped_event() {
+    DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn dropped_events() -> u64 {
+    DROPPED_EVENTS.load(Ordering::Relaxed)
 }
 
 pub async fn track_events(mut rx: broadcast::Receiver<SecurityEvent>) -> anyhow::Result<()> {
@@ -80,6 +92,7 @@ impl StatsState {
         StatsSnapshot {
             events_per_minute: self.events_last_minute.len() as f64,
             total_events: self.total_events,
+            dropped_events: dropped_events(),
             events_by_severity: self.events_by_severity.clone(),
             events_by_type: self.events_by_type.clone(),
             updated_at: now,

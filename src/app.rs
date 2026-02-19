@@ -147,7 +147,13 @@ pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynEr
     let mut recent_events: VecDeque<SecurityEvent> = VecDeque::with_capacity(20);
 
     for event in build_test_events() {
-        let _ = event_tx.send(event.clone());
+        if let Err(err) = event_tx.send(event.clone()) {
+            stats::record_dropped_event();
+            warn!(
+                event_type = %err.0.event_type,
+                "dropping event: broadcast channel full or closed"
+            );
+        }
 
         if json_output {
             match serde_json::to_string(&event) {
@@ -182,11 +188,13 @@ pub fn print_status(json_output: bool) -> Result<(), DynError> {
             "running": running,
             "pid_file": pid_file,
             "stats": stats,
+            "dropped_events": stats::dropped_events(),
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if running {
         println!("{}", Color::Green.paint("Leash is running"));
+        println!("dropped events: {}", stats::dropped_events());
         if let Ok(Some(snapshot)) = stats::load_snapshot() {
             println!("events/minute: {:.2}", snapshot.events_per_minute);
             println!("total events: {}", snapshot.total_events);

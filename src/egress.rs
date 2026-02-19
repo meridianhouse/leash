@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, NetConnection, SecurityEvent, ThreatLevel};
-use chrono::Utc;
+use crate::stats;
 use nix::libc;
 use nu_ansi_term::Color;
 use std::collections::{HashMap, HashSet};
@@ -143,7 +143,14 @@ impl EgressMonitor {
                 };
                 let mut event = SecurityEvent::new(event_type, level, narrative);
                 event.connection = Some(conn);
-                let _ = self.tx.send(mitre::infer_and_tag(event));
+                let event = mitre::infer_and_tag(event);
+                if let Err(err) = self.tx.send(event) {
+                    stats::record_dropped_event();
+                    warn!(
+                        event_type = %err.0.event_type,
+                        "dropping event: broadcast channel full or closed"
+                    );
+                }
             }
         }
 
@@ -343,7 +350,8 @@ fn parse_addr_port(raw: &str) -> Option<(String, u16)> {
 }
 
 fn detect_proc_root(running_in_container: bool) -> String {
-    if let Ok(root) = std::env::var("LEASH_PROC_ROOT")
+    if running_in_container
+        && let Ok(root) = std::env::var("LEASH_PROC_ROOT")
         && !root.trim().is_empty()
     {
         return root;

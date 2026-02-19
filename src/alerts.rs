@@ -121,14 +121,22 @@ impl AlertDispatcher {
     }
 
     fn track_process_start_time(&self, pid: i32) {
-        let mut start_times = self.process_start_times.lock().unwrap();
+        let mut start_times = self
+            .process_start_times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !start_times.contains_key(&pid) {
             start_times.insert(pid, Instant::now());
         }
     }
 
     fn is_new_process(&self, pid: i32) -> bool {
-        if let Some(start_time) = self.process_start_times.lock().unwrap().get(&pid) {
+        if let Some(start_time) = self
+            .process_start_times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&pid)
+        {
             let elapsed = Instant::now().duration_since(*start_time);
             elapsed < Duration::from_secs(self.cfg.alerts.first_process_minutes * 60)
         } else {
@@ -162,7 +170,7 @@ impl AlertDispatcher {
         let key = (agent_name.to_string(), cmd_pattern);
         self.normal_commands
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(key, Instant::now());
     }
 
@@ -192,7 +200,10 @@ impl AlertDispatcher {
         let dedup_window = Duration::from_secs(self.cfg.alerts.deduplication_hours * 3600);
         let now = Instant::now();
 
-        let mut cache = self.deduplication_cache.lock().unwrap();
+        let mut cache = self
+            .deduplication_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Clean old entries
         cache.retain(|_, time| now.duration_since(*time) < dedup_window);
@@ -210,12 +221,18 @@ impl AlertDispatcher {
     }
 
     fn is_in_learning_mode(&self) -> bool {
-        let mut learning = self.learning_mode_active.lock().unwrap();
+        let mut learning = self
+            .learning_mode_active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if !*learning {
             return false;
         }
 
-        let start_time = *self.learning_start_time.lock().unwrap();
+        let start_time = *self
+            .learning_start_time
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let elapsed = Instant::now().duration_since(start_time);
         let learning_duration = Duration::from_secs(self.cfg.alerts.learning_mode_hours * 3600);
 
@@ -317,7 +334,10 @@ impl AlertDispatcher {
         let now = Instant::now();
 
         {
-            let tracker = self.rate_limit_tracker.lock().unwrap();
+            let tracker = self
+                .rate_limit_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(last) = tracker.get(&key)
                 && now.duration_since(*last) < self.rate_limit
             {
@@ -331,7 +351,10 @@ impl AlertDispatcher {
         }
 
         // Update rate limit tracker
-        self.rate_limit_tracker.lock().unwrap().insert(key, now);
+        self.rate_limit_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, now);
 
         true
     }
@@ -838,7 +861,9 @@ fn is_failed_or_suspicious_event(event: &SecurityEvent) -> bool {
         "permission denied",
     ];
 
-    failure_markers.iter().any(|marker| narrative.contains(marker))
+    failure_markers
+        .iter()
+        .any(|marker| narrative.contains(marker))
 }
 
 fn is_non_deduplicable_dangerous_command(cmdline: &str) -> bool {
@@ -914,53 +939,55 @@ mod tests {
     }
 
     #[test]
-    fn slack_payload_is_valid_json() {
+    fn slack_payload_is_valid_json() -> Result<(), serde_json::Error> {
         let payload = build_slack_payload(&sample_event());
-        let serialized = serde_json::to_string(&payload).expect("serialize slack payload");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serialized).expect("parse slack payload json");
+        let serialized = serde_json::to_string(&payload)?;
+        let parsed: serde_json::Value = serde_json::from_str(&serialized)?;
         assert!(parsed.get("text").is_some());
-        let attachments = parsed["attachments"]
-            .as_array()
-            .expect("slack attachments must be an array");
-        assert!(
-            !attachments.is_empty(),
-            "slack attachments should not be empty"
-        );
-        assert!(
-            attachments[0]["blocks"].is_array(),
-            "first slack attachment should have blocks array"
-        );
+        let attachments = parsed["attachments"].as_array();
+        assert!(attachments.is_some(), "slack attachments must be an array");
+        if let Some(attachments) = attachments {
+            assert!(
+                !attachments.is_empty(),
+                "slack attachments should not be empty"
+            );
+            assert!(
+                attachments[0]["blocks"].is_array(),
+                "first slack attachment should have blocks array"
+            );
+        }
+        Ok(())
     }
 
     #[test]
-    fn discord_payload_is_valid_json() {
+    fn discord_payload_is_valid_json() -> Result<(), serde_json::Error> {
         let payload = build_discord_payload(&sample_event());
-        let serialized = serde_json::to_string(&payload).expect("serialize discord payload");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serialized).expect("parse discord payload json");
-        let embeds = parsed["embeds"]
-            .as_array()
-            .expect("discord embeds must be an array");
-        assert!(!embeds.is_empty(), "discord embeds should not be empty");
-        assert!(
-            embeds[0].get("color").is_some(),
-            "first discord embed should include color"
-        );
+        let serialized = serde_json::to_string(&payload)?;
+        let parsed: serde_json::Value = serde_json::from_str(&serialized)?;
+        let embeds = parsed["embeds"].as_array();
+        assert!(embeds.is_some(), "discord embeds must be an array");
+        if let Some(embeds) = embeds {
+            assert!(!embeds.is_empty(), "discord embeds should not be empty");
+            assert!(
+                embeds[0].get("color").is_some(),
+                "first discord embed should include color"
+            );
+        }
+        Ok(())
     }
 
     #[test]
-    fn telegram_payload_is_valid_json() {
+    fn telegram_payload_is_valid_json() -> Result<(), serde_json::Error> {
         let payload = build_telegram_payload(&sample_event(), "123456");
-        let serialized = serde_json::to_string(&payload).expect("serialize telegram payload");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serialized).expect("parse telegram payload json");
+        let serialized = serde_json::to_string(&payload)?;
+        let parsed: serde_json::Value = serde_json::from_str(&serialized)?;
         assert_eq!(parsed["chat_id"], "123456");
         assert!(
             parsed["text"].is_string(),
             "telegram payload text must be a string"
         );
         assert_eq!(parsed["parse_mode"], "HTML");
+        Ok(())
     }
 
     #[test]

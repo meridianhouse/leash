@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, FileEvent, SecurityEvent, ThreatLevel};
+use crate::stats;
 use blake3::Hasher;
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
@@ -43,16 +44,27 @@ impl FileIntegrityMonitor {
             }
         };
 
-        let paths: Vec<PathBuf> = self.cfg.fim_paths.iter().map(PathBuf::from).collect();
-        for path in &paths {
-            if !path.exists() {
+        let raw_paths: Vec<PathBuf> = self.cfg.fim_paths.iter().map(PathBuf::from).collect();
+        for path in &raw_paths {
+            let canonical = match fs::canonicalize(path) {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        path = %path.display(),
+                        "failed to canonicalize FIM path; skipping watch"
+                    );
+                    continue;
+                }
+            };
+            if !canonical.exists() {
                 continue;
             }
-            if let Err(err) = self.seed_baseline(path) {
-                warn!(?err, path = %path.display(), "failed to baseline path");
+            if let Err(err) = self.seed_baseline(&canonical) {
+                warn!(?err, path = %canonical.display(), "failed to baseline path");
             }
-            if let Err(err) = watcher.watch(path, RecursiveMode::Recursive) {
-                warn!(?err, path = %path.display(), "failed to watch path");
+            if let Err(err) = watcher.watch(&canonical, RecursiveMode::Recursive) {
+                warn!(?err, path = %canonical.display(), "failed to watch path");
             }
         }
 
@@ -61,7 +73,13 @@ impl FileIntegrityMonitor {
                 Ok(event) => {
                     for path in event.paths {
                         if let Some(sec) = self.convert_event(&path, &event.kind) {
-                            let _ = self.tx.send(sec);
+                            if let Err(err) = self.tx.send(sec) {
+                                stats::record_dropped_event();
+                                warn!(
+                                    event_type = %err.0.event_type,
+                                    "dropping event: broadcast channel full or closed"
+                                );
+                            }
                         }
                     }
                 }
@@ -132,7 +150,13 @@ impl FileIntegrityMonitor {
             && let Some(injection_event) =
                 crate::prompt_injection::scan_file_for_injection(&key, &content)
         {
-            let _ = self.tx.send(injection_event);
+            if let Err(err) = self.tx.send(injection_event) {
+                stats::record_dropped_event();
+                warn!(
+                    event_type = %err.0.event_type,
+                    "dropping event: broadcast channel full or closed"
+                );
+            }
         }
 
         Some(mitre::infer_and_tag(event))

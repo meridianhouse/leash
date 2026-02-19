@@ -1,9 +1,10 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, SecurityEvent, ThreatLevel};
+use crate::stats;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub struct Watchdog {
     cfg: Config,
@@ -23,7 +24,13 @@ impl Watchdog {
                 ThreatLevel::Green,
                 "Watchdog heartbeat".to_string(),
             ));
-            let _ = self.tx.send(event);
+            if let Err(err) = self.tx.send(event) {
+                stats::record_dropped_event();
+                warn!(
+                    event_type = %err.0.event_type,
+                    "dropping event: broadcast channel full or closed"
+                );
+            }
             sleep(Duration::from_millis(self.cfg.monitor_interval_ms * 5)).await;
         }
     }
