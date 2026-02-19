@@ -301,4 +301,46 @@ mod tests {
                 .any(|item| item.eq_ignore_ascii_case("codex"))
         );
     }
+
+    #[test]
+    fn config_with_all_fields_set_parses() {
+        let yaml = r#"
+monitor_interval_ms: 250
+ai_agents: [codex, claude]
+legitimate_ai_parents: [bash, tmux]
+sensitive_path_keywords: [token, secret]
+fim_paths: [/etc/passwd, ~/.ssh]
+protected_processes: [systemd, leash]
+response:
+  enable_sigstop: true
+  stop_min_level: red
+alerts:
+  min_level: orange
+  slack:
+    enabled: true
+    url: https://hooks.slack.com/services/test
+  discord:
+    enabled: true
+    url: https://discord.com/api/webhooks/test
+  telegram:
+    enabled: true
+    token: token123
+    chat_id: chat123
+  json_log:
+    enabled: true
+    path: ~/.local/state/leash/custom-alerts.jsonl
+egress:
+  suspicious_ports: [4444, 31337]
+  tor_ports: [9050, 9051]
+  exfil_domains: [pastebin, file.io]
+  suspicious_country_ip_prefixes: [203.0.113.]
+"#;
+
+        let parsed: Config = serde_yaml::from_str(yaml).expect("all-fields config should parse");
+        assert_eq!(parsed.monitor_interval_ms, 250);
+        assert_eq!(parsed.response.stop_min_level, "red");
+        assert_eq!(parsed.alerts.min_level, "orange");
+        assert_eq!(parsed.egress.suspicious_ports, vec![4444, 31337]);
+        assert_eq!(parsed.egress.suspicious_country_ip_prefixes, vec!["203.0.113."]);
+    }
 }

@@ -136,12 +136,28 @@ impl SecurityEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::ThreatLevel;
+    use super::{EventType, SecurityEvent, ThreatLevel};
 
     #[test]
     fn threat_level_ordering() {
         assert!(ThreatLevel::Green < ThreatLevel::Yellow);
         assert!(ThreatLevel::Yellow < ThreatLevel::Orange);
         assert!(ThreatLevel::Orange < ThreatLevel::Red);
+        assert!(ThreatLevel::Red < ThreatLevel::Nuclear);
+    }
+
+    #[test]
+    fn security_event_serializes_to_json() {
+        let event = SecurityEvent::new(
+            EventType::CredentialAccess,
+            ThreatLevel::Red,
+            "credential file read".to_string(),
+        );
+
+        let value = serde_json::to_value(event).expect("security event should serialize");
+        assert_eq!(value["event_type"], "credential_access");
+        assert_eq!(value["threat_level"], "red");
+        assert_eq!(value["narrative"], "credential file read");
+        assert!(value.get("timestamp").is_some());
     }
 }

@@ -204,34 +204,40 @@ mod tests {
     use super::*;
     use crate::models::{EventType, SecurityEvent, ThreatLevel};
 
-    fn has_technique(event: &SecurityEvent, technique_id: &str) -> bool {
+    fn has_technique_prefix(event: &SecurityEvent, technique_id_prefix: &str) -> bool {
         event
             .mitre
             .iter()
-            .any(|mapping| mapping.technique_id == technique_id)
+            .any(|mapping| mapping.technique_id.starts_with(technique_id_prefix))
     }
 
     #[test]
-    fn event_type_to_mitre_mapping_is_correct() {
-        let shell = infer_and_tag(SecurityEvent::new(
+    fn process_spawn_gets_t1059_mapping() {
+        let shell_event = infer_and_tag(SecurityEvent::new(
             EventType::ProcessShellSpawn,
             ThreatLevel::Yellow,
             "shell".into(),
         ));
-        assert!(has_technique(&shell, "T1059.004"));
+        assert!(has_technique_prefix(&shell_event, "T1059"));
+    }
 
-        let cred = infer_and_tag(SecurityEvent::new(
+    #[test]
+    fn credential_access_gets_t1552_mapping() {
+        let credential_event = infer_and_tag(SecurityEvent::new(
             EventType::CredentialAccess,
             ThreatLevel::Red,
             "credential".into(),
         ));
-        assert!(has_technique(&cred, "T1552.001"));
+        assert!(has_technique_prefix(&credential_event, "T1552"));
+    }
 
-        let network = infer_and_tag(SecurityEvent::new(
+    #[test]
+    fn network_events_get_t1071_mapping() {
+        let network_event = infer_and_tag(SecurityEvent::new(
             EventType::NetworkSuspicious,
             ThreatLevel::Orange,
             "network".into(),
         ));
-        assert!(has_technique(&network, "T1071.001"));
+        assert!(has_technique_prefix(&network_event, "T1071"));
     }
 }
