@@ -670,21 +670,26 @@ async fn webhook_valid_url_receives_alert_posts() {
         return;
     };
     let home = temp_home("webhook-valid");
-    write_config(
+    let config_path = write_config(
         &home,
         &format!(
-            "alerts:\n  min_severity: green\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+            "alerts:\n  min_severity: green\n  rate_limit_seconds: 0\n  learning_mode_hours: 0\n  first_process_minutes: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
             server.url()
         ),
     );
+    let config_path = config_path.to_string_lossy().to_string();
 
-    let output = run_leash(&home, &["--json", "test"]);
+    let output = run_leash(&home, &["--config", &config_path, "--json", "test"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(server.request_count() >= 2, "Expected at least 2 alerts (orange+red), got {}", server.request_count());
+    assert!(
+        server.request_count() >= 2,
+        "Expected at least 2 alerts (orange+red), got {}",
+        server.request_count()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -713,21 +718,26 @@ async fn webhook_404_and_500_are_non_fatal() {
             return;
         };
         let home = temp_home(label);
-        write_config(
+        let config_path = write_config(
             &home,
             &format!(
-                "alerts:\n  min_severity: green\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+                "alerts:\n  min_severity: green\n  rate_limit_seconds: 0\n  learning_mode_hours: 0\n  first_process_minutes: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
                 server.url()
             ),
         );
+        let config_path = config_path.to_string_lossy().to_string();
 
-        let output = run_leash(&home, &["--json", "test"]);
+        let output = run_leash(&home, &["--config", &config_path, "--json", "test"]);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(server.request_count() >= 2, "Expected at least 2 alerts (orange+red), got {}", server.request_count());
+        assert!(
+            server.request_count() >= 2,
+            "Expected at least 2 alerts (orange+red), got {}",
+            server.request_count()
+        );
     }
 }
 
@@ -804,15 +814,16 @@ async fn each_severity_threshold_triggers_expected_alert_volume() {
             return;
         };
         let home = temp_home(&format!("severity-{severity}"));
-        write_config(
+        let config_path = write_config(
             &home,
             &format!(
-                "alerts:\n  min_severity: {severity}\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+                "alerts:\n  min_severity: {severity}\n  rate_limit_seconds: 0\n  learning_mode_hours: 0\n  first_process_minutes: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
                 server.url()
             ),
         );
+        let config_path = config_path.to_string_lossy().to_string();
 
-        let output = run_leash(&home, &["--json", "test"]);
+        let output = run_leash(&home, &["--config", &config_path, "--json", "test"]);
         assert!(
             output.status.success(),
             "{}",

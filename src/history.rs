@@ -208,16 +208,17 @@ fn query_stored_events(
     let mut stmt = conn
         .prepare(&query)
         .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "prepare query"))?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
-        Ok(StoredEvent {
-            timestamp: row.get(0)?,
-            severity: row.get(1)?,
-            event_type: row.get(2)?,
-            narrative: row.get(3)?,
-            payload_json: row.get(4)?,
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            Ok(StoredEvent {
+                timestamp: row.get(0)?,
+                severity: row.get(1)?,
+                event_type: row.get(2)?,
+                narrative: row.get(3)?,
+                payload_json: row.get(4)?,
+            })
         })
-    })
-    .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "run query"))?;
+        .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "run query"))?;
 
     let mut records = Vec::new();
     for item in rows {
@@ -274,11 +275,7 @@ fn sqlite_err_with_hint(err: rusqlite::Error, path: &Path, operation: &str) -> a
     err.into()
 }
 
-fn sqlite_err_with_hint_str(
-    err: rusqlite::Error,
-    db_file: &str,
-    operation: &str,
-) -> anyhow::Error {
+fn sqlite_err_with_hint_str(err: rusqlite::Error, db_file: &str, operation: &str) -> anyhow::Error {
     if is_sqlite_locked(&err) {
         return anyhow::anyhow!(
             "SQLite DB is locked at {} while trying to {}. Check for other running Leash instances that may be using the same database.",

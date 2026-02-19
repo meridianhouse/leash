@@ -117,7 +117,9 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
     if combined.contains("fileless_pipeline_decode")
         || combined.contains("fileless_pipeline_python")
         || combined.contains("exec_tmpdir")
-        || ((combined.contains("curl ") || combined.contains("http://") || combined.contains("https://"))
+        || ((combined.contains("curl ")
+            || combined.contains("http://")
+            || combined.contains("https://"))
             && (combined.contains("| python") || combined.contains("| python3")))
     {
         add_technique(&mut event, "T1059.004");
@@ -193,7 +195,10 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "AML.T0054" => ("ATLAS", "LLM Prompt Injection"),
         "AML.T0051" => ("ATLAS", "Model Evasion"),
         "T1059.004" => ("Execution", "Command and Scripting Interpreter: Unix Shell"),
-        "T1059.002" => ("Execution", "Command and Scripting Interpreter: AppleScript"),
+        "T1059.002" => (
+            "Execution",
+            "Command and Scripting Interpreter: AppleScript",
+        ),
         "T1059.006" => ("Execution", "Command and Scripting Interpreter: Python"),
         "T1552.001" => (
             "Credential Access",
@@ -213,7 +218,10 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
             "Persistence",
             "Boot/Logon Autostart: systemd or cron modification",
         ),
-        "T1543.001" => ("Persistence", "Create or Modify System Process: Launch Agent"),
+        "T1543.001" => (
+            "Persistence",
+            "Create or Modify System Process: Launch Agent",
+        ),
         "T1105" => ("Command and Control", "Ingress Tool Transfer"),
         "T1027" => (
             "Defense Evasion",

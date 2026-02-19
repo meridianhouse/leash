@@ -674,7 +674,11 @@ egress:
         cfg.alerts.discord.url = "not-a-url".into();
 
         let warnings = cfg.startup_warnings();
-        assert!(warnings.iter().any(|w| w.contains("http://bad.example/slack")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("http://bad.example/slack"))
+        );
         assert!(warnings.iter().any(|w| w.contains("not-a-url")));
         assert!(
             warnings
