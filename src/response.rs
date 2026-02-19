@@ -1,7 +1,8 @@
 use crate::config::Config;
-use crate::models::{SecurityEvent, ThreatLevel};
+use crate::models::{ProcessInfo, SecurityEvent, ThreatLevel};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use std::fs;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
 
@@ -56,11 +57,34 @@ impl ResponseEngine {
             return;
         }
 
+        if !process_identity_matches(&proc) {
+            warn!(
+                pid = proc.pid,
+                process = proc.name,
+                "skip SIGSTOP because process identity changed (possible PID reuse)"
+            );
+            return;
+        }
+
         match kill(Pid::from_raw(proc.pid), Signal::SIGSTOP) {
             Ok(_) => info!(pid = proc.pid, process = proc.name, "SIGSTOP applied"),
             Err(err) => warn!(?err, pid = proc.pid, process = proc.name, "SIGSTOP failed"),
         }
     }
+}
+
+fn process_identity_matches(proc: &ProcessInfo) -> bool {
+    let exe_path = format!("/proc/{}/exe", proc.pid);
+    let current_exe = match fs::read_link(exe_path) {
+        Ok(path) => path.display().to_string(),
+        Err(_) => return false,
+    };
+
+    if !proc.exe.is_empty() && current_exe != proc.exe {
+        return false;
+    }
+
+    true
 }
 
 fn parse_level(raw: &str) -> ThreatLevel {

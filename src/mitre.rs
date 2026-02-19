@@ -66,8 +66,13 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         || combined.contains("base64 --decode")
         || combined.contains("base64_decode")
         || combined.contains("encoded_python")
+        || combined.contains("hidden_unicode_command")
     {
         add_technique(&mut event, "T1027");
+    }
+
+    if combined.contains("hidden_unicode_command") {
+        add_technique(&mut event, "T1027.013");
     }
 
     if combined.contains("ssh_unusual_host")
@@ -95,6 +100,12 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         || combined.contains("write_sensitive_path")
     {
         add_technique(&mut event, "T1222.001");
+    }
+
+    if combined.contains("npm_pip_postinstall_shell")
+        || combined.contains("pyinstaller_unexpected_location")
+    {
+        add_technique(&mut event, "T1195.002");
     }
 
     if combined.contains("gatekeeper_bypass")
@@ -136,6 +147,26 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         add_technique(&mut event, "T1552.001");
     }
 
+    if combined.contains("ai_agent_credential_access") {
+        add_technique(&mut event, "T1552");
+    }
+
+    if combined.contains("ai_skill_directory_spawn") {
+        add_technique(&mut event, "T1059");
+    }
+
+    if combined.contains("package_install_external_ip") {
+        add_technique(&mut event, "T1071.001");
+    }
+
+    if combined.contains("rmm_suspicious_parent") {
+        add_technique(&mut event, "T1219");
+    }
+
+    if combined.contains("ld_preload_set") {
+        add_technique(&mut event, "T1574.006");
+    }
+
     let persistence_path = event
         .file_event
         .as_ref()
@@ -145,8 +176,15 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         || persistence_path.contains("/etc/cron")
         || persistence_path.contains("/var/spool/cron")
         || combined.contains("crontab ")
+        || combined.contains("crontab_modification")
     {
-        add_technique(&mut event, "T1547.001");
+        add_technique(&mut event, "T1053.003");
+    }
+
+    if combined.contains("ssh_authorized_keys_modification")
+        || persistence_path.contains(".ssh/authorized_keys")
+    {
+        add_technique(&mut event, "T1098.004");
     }
 
     event
@@ -228,6 +266,16 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
             "Obfuscated/Compressed Files and Information",
         ),
         "T1021.004" => ("Lateral Movement", "Remote Services: SSH"),
+        "T1027.013" => (
+            "Defense Evasion",
+            "Obfuscated Files or Information: Encrypted/Encoded File",
+        ),
+        "T1053.003" => ("Execution", "Scheduled Task/Job: Cron"),
+        "T1098.004" => ("Persistence", "Account Manipulation: SSH Authorized Keys"),
+        "T1195.002" => ("Resource Development", "Compromise Software Supply Chain"),
+        "T1219" => ("Command and Control", "Remote Access Software"),
+        "T1552" => ("Credential Access", "Unsecured Credentials"),
+        "T1574.006" => ("Persistence", "Hijack Execution Flow: Dynamic Linker Hijacking"),
         "T1567" => ("Exfiltration", "Exfiltration Over Web Service"),
         "T1090" => ("Command and Control", "Proxy"),
         "T1222.001" => (
@@ -321,5 +369,24 @@ mod tests {
             "Dangerous command pattern(s) [launchd_persistence]".into(),
         ));
         assert!(has_technique_prefix(&event, "T1543.001"));
+    }
+
+    #[test]
+    fn new_detection_patterns_map_to_expected_techniques() {
+        let event = infer_and_tag(SecurityEvent::new(
+            EventType::NetworkSuspicious,
+            ThreatLevel::Red,
+            "Dangerous command pattern(s) [rmm_suspicious_parent,npm_pip_postinstall_shell,hidden_unicode_command,ai_agent_credential_access,ai_skill_directory_spawn,pyinstaller_unexpected_location,package_install_external_ip,ld_preload_set,crontab_modification,ssh_authorized_keys_modification]"
+                .into(),
+        ));
+        assert!(has_technique_prefix(&event, "T1219"));
+        assert!(has_technique_prefix(&event, "T1195.002"));
+        assert!(has_technique_prefix(&event, "T1027.013"));
+        assert!(has_technique_prefix(&event, "T1552"));
+        assert!(has_technique_prefix(&event, "T1059"));
+        assert!(has_technique_prefix(&event, "T1071.001"));
+        assert!(has_technique_prefix(&event, "T1574.006"));
+        assert!(has_technique_prefix(&event, "T1053.003"));
+        assert!(has_technique_prefix(&event, "T1098.004"));
     }
 }

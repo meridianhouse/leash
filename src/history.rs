@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tracing::warn;
 
+const MAX_DB_PAGES: usize = 131_072;
+const MAX_STORED_EVENTS: i64 = 200_000;
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct HistoryRecord {
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -88,6 +91,8 @@ fn open_db_at(path: &Path) -> anyhow::Result<Connection> {
     }
 
     let conn = Connection::open(path).map_err(|err| sqlite_err_with_hint(err, path, "open"))?;
+    conn.pragma_update(None, "max_page_count", MAX_DB_PAGES)
+        .map_err(|err| sqlite_err_with_hint(err, path, "set max_page_count"))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +136,20 @@ fn insert_event(conn: &Connection, event: &SecurityEvent) -> anyhow::Result<()> 
         ],
     )
     .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "insert event"))?;
+    prune_old_events(conn)?;
+    Ok(())
+}
+
+fn prune_old_events(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM events
+         WHERE id IN (
+             SELECT id FROM events
+             ORDER BY id DESC
+             LIMIT -1 OFFSET ?1
+         )",
+        params![MAX_STORED_EVENTS],
+    )?;
     Ok(())
 }
 

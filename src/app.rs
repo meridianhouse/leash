@@ -16,7 +16,7 @@ use nix::unistd::Pid;
 use nu_ansi_term::Color;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -226,12 +226,14 @@ pub fn print_status(json_output: bool) -> Result<(), DynError> {
 
 pub fn stop_agent(json_output: bool) -> Result<(), DynError> {
     let pid_file = pid_file_path()?;
-    let pid = read_pid_from_file(&pid_file)?.ok_or_else(|| {
-        format!(
-            "Leash is not running (missing or stale PID file at {})",
-            pid_file.display()
-        )
-    })?;
+    let pid = read_pid_from_file(&pid_file)?
+        .map(|record| record.pid)
+        .ok_or_else(|| {
+            format!(
+                "Leash is not running (missing or stale PID file at {})",
+                pid_file.display()
+            )
+        })?;
     signal::kill(Pid::from_raw(pid), Signal::SIGTERM)?;
     cleanup_pid_file();
 
@@ -330,7 +332,8 @@ fn print_startup_banner() {
 
 fn ensure_single_instance() -> Result<(), DynError> {
     let pid_file = pid_file_path()?;
-    if let Some(pid) = read_pid_from_file(&pid_file)? {
+    if let Some(record) = read_pid_from_file(&pid_file)? {
+        let pid = record.pid;
         return Err(format!("Leash already running with PID {pid}").into());
     }
 
@@ -354,7 +357,11 @@ fn write_pid_file() -> Result<(), DynError> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&pid_file)?;
-    file.write_all(format!("{}\n", std::process::id()).as_bytes())?;
+    let pid = std::process::id() as i32;
+    let start_ticks = read_proc_start_ticks(pid)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    file.write_all(format!("{pid} {start_ticks}\n").as_bytes())?;
     file.sync_all()?;
     Ok(())
 }
@@ -386,12 +393,24 @@ fn create_runtime_dir(path: &Path) -> Result<(), DynError> {
     Ok(())
 }
 
-fn read_pid_from_file(path: &Path) -> Result<Option<i32>, DynError> {
-    if !path.exists() {
-        return Ok(None);
-    }
+#[derive(Debug, Clone, Copy)]
+struct PidRecord {
+    pid: i32,
+    start_ticks: Option<u64>,
+}
 
-    let metadata = fs::metadata(path)?;
+fn read_pid_from_file(path: &Path) -> Result<Option<PidRecord>, DynError> {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(format!("PID file is not a regular file: {}", path.display()).into());
     }
@@ -401,10 +420,12 @@ fn read_pid_from_file(path: &Path) -> Result<Option<i32>, DynError> {
         return Err(format!("PID file {} is not owned by current user", path.display()).into());
     }
 
-    let pid_raw = fs::read_to_string(path)?;
-    let Ok(pid) = pid_raw.trim().parse::<i32>() else {
+    let mut pid_raw = String::new();
+    file.read_to_string(&mut pid_raw)?;
+    let Some(record) = parse_pid_record(pid_raw.trim()) else {
         return Ok(None);
     };
+    let pid = record.pid;
     if pid <= 0 {
         return Ok(None);
     }
@@ -419,10 +440,39 @@ fn read_pid_from_file(path: &Path) -> Result<Option<i32>, DynError> {
         return Err(format!("PID {pid} is not owned by current user").into());
     }
 
-    Ok(Some(pid))
+    // If start ticks are present, enforce process identity to prevent PID reuse confusion.
+    if let Some(expected_ticks) = record.start_ticks {
+        let Some(actual_ticks) = read_proc_start_ticks(pid) else {
+            return Ok(None);
+        };
+        if actual_ticks != expected_ticks {
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(record))
 }
 
 fn current_uid() -> u32 {
     // SAFETY: geteuid is thread-safe and has no preconditions.
     unsafe { libc::geteuid() }
+}
+
+fn parse_pid_record(raw: &str) -> Option<PidRecord> {
+    let mut parts = raw.split_whitespace();
+    let pid = parts.next()?.parse::<i32>().ok()?;
+    let start_ticks = parts
+        .next()
+        .filter(|value| *value != "-")
+        .and_then(|value| value.parse::<u64>().ok());
+    Some(PidRecord { pid, start_ticks })
+}
+
+fn read_proc_start_ticks(pid: i32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let tail = stat.get(close + 2..)?;
+    let fields: Vec<&str> = tail.split_whitespace().collect();
+    let start_ticks_index = 19;
+    fields.get(start_ticks_index)?.parse::<u64>().ok()
 }
