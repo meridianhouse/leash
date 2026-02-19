@@ -853,6 +853,7 @@ dependencies = [
  "nu-ansi-term",
  "procfs",
  "quickcheck",
+ "rand",
  "reqwest",
  "rusqlite",
  "serde",

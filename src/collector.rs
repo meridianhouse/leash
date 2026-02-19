@@ -4,6 +4,7 @@ use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, Th
 use crate::stats;
 use nix::libc;
 use procfs::process::Process;
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -41,7 +42,7 @@ impl ProcessCollector {
     pub async fn run(mut self) {
         loop {
             self.collect_once();
-            sleep(Duration::from_millis(self.cfg.monitor_interval_ms)).await;
+            sleep(jittered_scan_interval(self.cfg.monitor_interval_ms)).await;
         }
     }
 
@@ -610,6 +611,14 @@ fn parse_proc_start_ticks(stat: &str) -> Option<u64> {
     let fields: Vec<&str> = tail.split_whitespace().collect();
     let start_ticks_index = 19;
     fields.get(start_ticks_index)?.parse::<u64>().ok()
+}
+
+#[allow(deprecated)]
+fn jittered_scan_interval(base_ms: u64) -> Duration {
+    let mut rng = rand::thread_rng();
+    let jitter = rng.gen_range(-0.20_f64..=0.20_f64);
+    let adjusted_ms = ((base_ms as f64) * (1.0 + jitter)).round().max(1.0) as u64;
+    Duration::from_millis(adjusted_ms)
 }
 
 /// Redacts common secret formats from arbitrary text before logging or alerting.
@@ -1450,6 +1459,7 @@ mod tests {
     use super::detect_dangerous_commands;
     use super::detect_dangerous_commands_with_context;
     use super::detection_is_red;
+    use super::jittered_scan_interval;
     use super::scrub_secrets;
     use crate::config::Config;
     use crate::models::SecurityEvent;
@@ -1843,6 +1853,15 @@ mod tests {
     fn non_ai_process_is_not_flagged() {
         let collector = collector();
         assert!(!collector.is_ai_agent("sshd", "sshd: ryan", "/usr/sbin/sshd"));
+    }
+
+    #[test]
+    fn scan_interval_jitter_stays_within_twenty_percent() {
+        let base_ms = 1_000_u64;
+        for _ in 0..512 {
+            let jittered = jittered_scan_interval(base_ms).as_millis() as u64;
+            assert!((800..=1200).contains(&jittered));
+        }
     }
 
     #[test]
