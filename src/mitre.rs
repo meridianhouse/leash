@@ -237,6 +237,7 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
             "Execution",
             "Command and Scripting Interpreter: AppleScript",
         ),
+        "T1059" => ("Execution", "Command and Scripting Interpreter"),
         "T1059.006" => ("Execution", "Command and Scripting Interpreter: Python"),
         "T1552.001" => (
             "Credential Access",

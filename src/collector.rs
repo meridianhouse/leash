@@ -764,6 +764,7 @@ fn detect_credential_paths(open_fds: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static str> {
     let empty_ancestry = Vec::new();
     let empty_env = HashMap::new();
