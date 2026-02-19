@@ -130,7 +130,7 @@ pub fn run_scan(cfg: Config, json_output: bool) -> Result<(), DynError> {
     };
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", serde_json::to_string_pretty(&report.ai_agents)?);
     } else {
         render_scan_report(&report);
     }

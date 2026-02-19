@@ -404,24 +404,7 @@ impl ProcessCollector {
         let exe = exe.to_ascii_lowercase();
 
         self.cfg.allow_list.iter().find(|entry| {
-            let needle = entry.name.trim().to_ascii_lowercase();
-            if needle.is_empty() {
-                return false;
-            }
-
-            if name == needle {
-                return true;
-            }
-
-            if cmdline
-                .split_whitespace()
-                .map(normalize_exec_token)
-                .any(|token| token == needle)
-            {
-                return true;
-            }
-
-            normalize_exec_token(&exe) == needle
+            allow_list_entry_matches(&entry.name, &name, &cmdline, &exe)
         })
     }
 
@@ -792,6 +775,30 @@ fn normalize_exec_token(input: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or(token)
         .to_ascii_lowercase()
+}
+
+pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe: &str) -> bool {
+    let needle = entry_name.trim().to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    let cmdline = cmdline.to_ascii_lowercase();
+    let exe = exe.to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+
+    if name == needle {
+        return true;
+    }
+
+    if cmdline
+        .split_whitespace()
+        .map(normalize_exec_token)
+        .any(|token| token == needle)
+    {
+        return true;
+    }
+
+    normalize_exec_token(&exe) == needle
 }
 
 #[cfg(test)]

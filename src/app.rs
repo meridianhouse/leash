@@ -72,7 +72,7 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     let watchdog_handle = tokio::spawn(async move { watchdog.run().await });
 
     info!("Leash is running. Press Ctrl-C to stop.");
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await?;
     info!("Shutdown requested.");
 
     collector_handle.abort();
@@ -89,6 +89,24 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
 
     cleanup_pid_file();
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> Result<(), DynError> {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            ctrl_c = tokio::signal::ctrl_c() => ctrl_c?,
+            _ = sigterm.recv() => {}
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+        Ok(())
+    }
 }
 
 pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynError> {

@@ -6,6 +6,10 @@ pub trait KernelMonitor {
     fn on_event(&mut self, event: &SecurityEvent) -> anyhow::Result<()>;
 }
 
+pub fn attach_kernel_monitor(monitor: &mut dyn KernelMonitor) -> anyhow::Result<()> {
+    monitor.attach()
+}
+
 #[derive(Default)]
 #[allow(dead_code)]
 pub struct EbpfMonitor;

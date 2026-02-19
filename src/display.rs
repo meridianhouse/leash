@@ -75,7 +75,7 @@ fn color_for_level(level: ThreatLevel) -> AnsiString<'static> {
     }
 }
 
-fn format_process_tree_lines(process: &ProcessInfo) -> Vec<String> {
+pub fn format_process_tree_lines(process: &ProcessInfo) -> Vec<String> {
     let mut chain = process
         .parent_chain
         .iter()

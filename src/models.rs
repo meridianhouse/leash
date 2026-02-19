@@ -28,6 +28,7 @@ pub enum EventType {
     Persistence,
     ContainerEscape,
     VaultAccess,
+    PromptInjection,
 }
 
 impl std::fmt::Display for EventType {
@@ -46,6 +47,7 @@ impl std::fmt::Display for EventType {
             EventType::Persistence => "persistence",
             EventType::ContainerEscape => "container_escape",
             EventType::VaultAccess => "vault_access",
+            EventType::PromptInjection => "prompt_injection",
         };
         write!(f, "{text}")
     }

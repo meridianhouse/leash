@@ -359,7 +359,7 @@ fn discord_color(level: ThreatLevel) -> u32 {
     }
 }
 
-fn escape_html(value: &str) -> String {
+pub fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")

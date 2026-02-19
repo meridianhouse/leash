@@ -13,6 +13,7 @@ mod fim;
 mod history;
 mod mitre;
 mod models;
+mod prompt_injection;
 mod response;
 mod scan;
 mod stats;
@@ -22,6 +23,8 @@ mod watchdog;
 use crate::app::{init_config, init_tracing, print_status, run_agent, run_test_alerts, stop_agent};
 use crate::cli::{Cli, Commands};
 use crate::config::Config;
+use crate::ebpf::{EbpfMonitor, attach_kernel_monitor};
+use crate::models::{EventType, SecurityEvent, ThreatLevel};
 use clap::Parser;
 
 #[tokio::main]
@@ -29,7 +32,23 @@ async fn main() -> Result<(), app::DynError> {
     init_tracing();
     let cli = Cli::parse();
     if cli.ebpf {
-        println!("eBPF coming in v0.2");
+        let mut monitor = EbpfMonitor;
+        if let Err(err) = attach_kernel_monitor(&mut monitor) {
+            eprintln!("{err}");
+        }
+        if let Err(err) = ebpf::KernelMonitor::on_event(
+            &mut monitor,
+            &SecurityEvent::new(
+                EventType::ProcessNew,
+                ThreatLevel::Green,
+                "eBPF smoke event".to_string(),
+            ),
+        ) {
+            eprintln!("{err}");
+        }
+        if let Err(err) = ebpf::KernelMonitor::detach(&mut monitor) {
+            eprintln!("{err}");
+        }
     }
 
     match cli.command {
