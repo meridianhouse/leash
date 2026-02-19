@@ -64,7 +64,10 @@ async fn main() -> Result<(), DynError> {
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "leash=info".into());
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Result<(), DynError> {
