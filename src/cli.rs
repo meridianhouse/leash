@@ -22,6 +22,10 @@ pub enum Commands {
     Start,
     #[command(about = "Start and stream detected events")]
     Watch,
+    #[command(about = "Send fake GREEN/YELLOW/ORANGE/RED events through alerts")]
+    Test,
+    #[command(about = "One-time snapshot of active AI agents, trees, network, and sensitive FDs")]
+    Scan,
     #[command(about = "Show daemon status")]
     Status,
     #[command(about = "Stop Leash daemon")]
