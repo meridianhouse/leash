@@ -34,8 +34,10 @@ pub struct ResponseConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertsConfig {
-    #[serde(default = "default_alert_min_level")]
-    pub min_level: String,
+    #[serde(default = "default_alert_min_severity", alias = "min_level")]
+    pub min_severity: String,
+    #[serde(default = "default_alert_rate_limit_seconds")]
+    pub rate_limit_seconds: u64,
     #[serde(default)]
     pub slack: SlackAlertConfig,
     #[serde(default)]
@@ -127,7 +129,8 @@ impl Default for ResponseConfig {
 impl Default for AlertsConfig {
     fn default() -> Self {
         Self {
-            min_level: default_alert_min_level(),
+            min_severity: default_alert_min_severity(),
+            rate_limit_seconds: default_alert_rate_limit_seconds(),
             slack: SlackAlertConfig::default(),
             discord: DiscordAlertConfig::default(),
             telegram: TelegramAlertConfig::default(),
@@ -175,7 +178,6 @@ impl Config {
             .into_iter()
             .map(|p| expand_tilde(&p))
             .collect();
-
         Ok(cfg)
     }
 }
@@ -196,8 +198,12 @@ fn default_response_level() -> String {
     "orange".into()
 }
 
-fn default_alert_min_level() -> String {
+fn default_alert_min_severity() -> String {
     "yellow".into()
+}
+
+fn default_alert_rate_limit_seconds() -> u64 {
+    60
 }
 
 fn default_ai_agents() -> Vec<String> {
@@ -293,7 +299,8 @@ mod tests {
     fn default_config_yaml_parses() {
         let parsed: Config = serde_yaml::from_str(include_str!("../config/default.yaml"))
             .expect("default.yaml should parse");
-        assert_eq!(parsed.alerts.min_level, "yellow");
+        assert_eq!(parsed.alerts.min_severity, "yellow");
+        assert_eq!(parsed.alerts.rate_limit_seconds, 60);
         assert!(
             parsed
                 .ai_agents
@@ -315,7 +322,8 @@ response:
   enable_sigstop: true
   stop_min_level: red
 alerts:
-  min_level: orange
+  min_severity: orange
+  rate_limit_seconds: 120
   slack:
     enabled: true
     url: https://hooks.slack.com/services/test
@@ -339,7 +347,8 @@ egress:
         let parsed: Config = serde_yaml::from_str(yaml).expect("all-fields config should parse");
         assert_eq!(parsed.monitor_interval_ms, 250);
         assert_eq!(parsed.response.stop_min_level, "red");
-        assert_eq!(parsed.alerts.min_level, "orange");
+        assert_eq!(parsed.alerts.min_severity, "orange");
+        assert_eq!(parsed.alerts.rate_limit_seconds, 120);
         assert_eq!(parsed.egress.suspicious_ports, vec![4444, 31337]);
         assert_eq!(parsed.egress.suspicious_country_ip_prefixes, vec!["203.0.113."]);
     }

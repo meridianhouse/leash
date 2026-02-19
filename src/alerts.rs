@@ -2,9 +2,11 @@ use crate::config::Config;
 use crate::models::{SecurityEvent, ThreatLevel};
 use reqwest::Client;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tracing::{error, warn};
 
@@ -12,7 +14,9 @@ pub struct AlertDispatcher {
     cfg: Config,
     rx: broadcast::Receiver<SecurityEvent>,
     client: Client,
-    min_level: ThreatLevel,
+    min_severity: ThreatLevel,
+    rate_limit: Duration,
+    last_alert_by_type: HashMap<String, Instant>,
 }
 
 impl AlertDispatcher {
@@ -21,7 +25,9 @@ impl AlertDispatcher {
         rx: broadcast::Receiver<SecurityEvent>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
-            min_level: parse_level(&cfg.alerts.min_level),
+            min_severity: parse_level(&cfg.alerts.min_severity),
+            rate_limit: Duration::from_secs(cfg.alerts.rate_limit_seconds),
+            last_alert_by_type: HashMap::new(),
             cfg,
             rx,
             client: Client::builder().build()?,
@@ -36,14 +42,14 @@ impl AlertDispatcher {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
 
-            if event.threat_level < self.min_level {
-                continue;
-            }
-
             if self.cfg.alerts.json_log.enabled
                 && let Err(err) = self.write_local_log(&event)
             {
                 error!(?err, "failed to write alert log");
+            }
+
+            if event.threat_level < self.min_severity || !self.should_send_for_event_type(&event) {
+                continue;
             }
 
             if self.cfg.alerts.slack.enabled
@@ -70,6 +76,20 @@ impl AlertDispatcher {
                 warn!(?err, "telegram delivery failed");
             }
         }
+    }
+
+    fn should_send_for_event_type(&mut self, event: &SecurityEvent) -> bool {
+        let now = Instant::now();
+        let event_type = event.event_type.to_string();
+
+        if let Some(last) = self.last_alert_by_type.get(&event_type)
+            && now.duration_since(*last) < self.rate_limit
+        {
+            return false;
+        }
+
+        self.last_alert_by_type.insert(event_type, now);
+        true
     }
 
     fn write_local_log(

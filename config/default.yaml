@@ -56,7 +56,8 @@ response:
   stop_min_level: orange
 
 alerts:
-  min_level: yellow
+  min_severity: yellow
+  rate_limit_seconds: 60
 
   slack:
     enabled: false
