@@ -1,0 +1,4 @@
+token=abc123
+api_key=qwerty
+Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz12345
+AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP

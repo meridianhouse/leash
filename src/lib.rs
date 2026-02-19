@@ -8,6 +8,7 @@ pub mod ebpf;
 pub mod egress;
 pub mod export;
 pub mod fim;
+pub mod fuzzing;
 pub mod history;
 pub mod mitre;
 pub mod models;

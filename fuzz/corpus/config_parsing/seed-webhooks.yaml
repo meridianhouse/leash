@@ -1,0 +1,11 @@
+alerts:
+  slack:
+    enabled: true
+    url: https://hooks.slack.com/services/T000/B000/XXX
+  discord:
+    enabled: true
+    url: https://discord.com/api/webhooks/123/abc
+  telegram:
+    enabled: true
+    token: "123456:abcdefghijklmnopqrstuvwxyzABCDE"
+    chat_id: "-1001234567890"

@@ -2,7 +2,7 @@ name: Fuzz
 
 on:
   schedule:
-    - cron: "0 4 * * 1"
+    - cron: "0 4 * * *"
   workflow_dispatch:
 
 jobs:
@@ -38,9 +38,10 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Run ${{ matrix.target }} fuzz target
+        id: fuzz_run
         run: |
           cargo fuzz run ${{ matrix.target }} -- \
-            -max_total_time=120 \
+            -max_total_time=180 \
             -artifact_prefix=./fuzz/artifacts/${{ matrix.target }}/
 
       - name: Save fuzz corpus cache
@@ -64,3 +65,16 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
           if-no-files-found: ignore
+
+      - name: Notify crash webhook
+        if: failure() && secrets.FUZZ_ALERT_WEBHOOK_URL != ''
+        env:
+          FUZZ_ALERT_WEBHOOK_URL: ${{ secrets.FUZZ_ALERT_WEBHOOK_URL }}
+        run: |
+          curl -sSf -X POST "$FUZZ_ALERT_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(printf '{"text":"Leash fuzz crash/panic detected for target `%s` in run %s/%s. Artifacts: fuzz-artifacts-%s"}' \
+              '${{ matrix.target }}' \
+              '${{ github.repository }}' \
+              '${{ github.run_id }}' \
+              '${{ matrix.target }}')"

@@ -2,6 +2,7 @@
 
 use leash::mitre;
 use leash::models::{EventType, SecurityEvent, ThreatLevel};
+use leash::fuzzing::fuzz_write_into_corpus;
 use libfuzzer_sys::fuzz_target;
 
 fn event_type_from_byte(byte: u8) -> EventType {
@@ -31,5 +32,8 @@ fuzz_target!(|data: &[u8]| {
     let event_type = event_type_from_byte(data[0]);
     let narrative = String::from_utf8_lossy(&data[1..]).to_string();
     let event = SecurityEvent::new(event_type, ThreatLevel::Green, narrative);
-    let _ = mitre::infer_and_tag(event);
+    let tagged = mitre::infer_and_tag(event);
+    if !tagged.mitre.is_empty() {
+        let _ = fuzz_write_into_corpus("mitre_mapping", data);
+    }
 });

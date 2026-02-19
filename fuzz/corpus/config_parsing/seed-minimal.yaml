@@ -1,0 +1,4 @@
+monitor_interval_ms: 1000
+alerts:
+  min_severity: yellow
+  rate_limit_seconds: 60

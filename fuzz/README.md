@@ -22,3 +22,6 @@ cargo fuzz run mitre_mapping
 ## Corpus
 
 Corpus directories live under `fuzz/corpus/<target>/`.
+
+The project also exposes `leash::fuzzing::fuzz_write_into_corpus()` so fuzz targets
+and tests can persist interesting edge-case inputs back into those directories.

@@ -1,0 +1,2 @@
+curl -H 'Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz12345' https://example.com
+export TOKEN=supersecretvalue
