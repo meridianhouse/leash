@@ -1,8 +1,12 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, NetConnection, SecurityEvent, ThreatLevel};
+use nix::libc;
+use nu_ansi_term::Color;
 use procfs::process::FDTarget;
 use std::collections::{HashMap, HashSet};
+use std::ffi::CStr;
+use std::net::Ipv4Addr;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use tracing::warn;
@@ -11,6 +15,8 @@ pub struct EgressMonitor {
     cfg: Config,
     tx: broadcast::Sender<SecurityEvent>,
     prev: HashSet<String>,
+    dns_cache: HashMap<String, Option<String>>,
+    known_services: HashMap<String, &'static str>,
 }
 
 impl EgressMonitor {
@@ -19,6 +25,8 @@ impl EgressMonitor {
             cfg,
             tx,
             prev: HashSet::new(),
+            dns_cache: HashMap::new(),
+            known_services: known_services_map(),
         }
     }
 
@@ -73,36 +81,42 @@ impl EgressMonitor {
                 };
 
                 let suspicious_reasons = self.suspicious_reasons(&conn, &cmdline);
+                let resolved_host = self.resolve_hostname_cached(&conn.remote_addr);
+                let service = self.known_service_name(
+                    resolved_host.as_deref(),
+                    &conn.remote_addr,
+                    conn.remote_port,
+                );
+                let class = self.classify_destination(&conn, &cmdline, &service, &suspicious_reasons);
+                let level = class.threat_level();
+                let event_type = class.event_type();
+                let class_label = class.paint_label();
                 let suspicious = !suspicious_reasons.is_empty();
-                let level = if suspicious {
-                    ThreatLevel::Orange
-                } else {
-                    ThreatLevel::Green
-                };
-                let event_type = if suspicious {
-                    EventType::NetworkSuspicious
-                } else {
-                    EventType::NetworkNewConnection
-                };
 
                 let narrative = if suspicious {
                     format!(
-                        "Suspicious network connection {}:{} -> {}:{} (pid={}) reasons=[{}]",
+                        "Suspicious network connection {}:{} -> {}:{}{} (pid={}) service={} class={} reasons=[{}]",
                         conn.local_addr,
                         conn.local_port,
                         conn.remote_addr,
                         conn.remote_port,
+                        format_hostname_suffix(&resolved_host),
                         conn.pid,
+                        service.as_deref().unwrap_or("unknown"),
+                        class_label,
                         suspicious_reasons.join(",")
                     )
                 } else {
                     format!(
-                        "Network connection {}:{} -> {}:{} (pid={})",
+                        "Network connection {}:{} -> {}:{}{} (pid={}) service={} class={}",
                         conn.local_addr,
                         conn.local_port,
                         conn.remote_addr,
                         conn.remote_port,
-                        conn.pid
+                        format_hostname_suffix(&resolved_host),
+                        conn.pid,
+                        service.as_deref().unwrap_or("unknown"),
+                        class_label
                     )
                 };
                 let mut event = SecurityEvent::new(event_type, level, narrative);
@@ -112,6 +126,72 @@ impl EgressMonitor {
         }
 
         self.prev = seen;
+    }
+
+    fn classify_destination(
+        &self,
+        conn: &NetConnection,
+        process_cmdline: &str,
+        known_service: &Option<String>,
+        suspicious_reasons: &[&'static str],
+    ) -> DestinationClass {
+        if self.cfg.egress.tor_ports.contains(&conn.remote_port)
+            || self.cfg.egress.suspicious_ports.contains(&conn.remote_port)
+            || self.uses_exfil_service(process_cmdline)
+        {
+            return DestinationClass::KnownBad;
+        }
+
+        if !suspicious_reasons.is_empty() {
+            return DestinationClass::KnownBad;
+        }
+
+        if known_service.is_some() {
+            DestinationClass::KnownGood
+        } else {
+            DestinationClass::Unknown
+        }
+    }
+
+    fn resolve_hostname_cached(&mut self, remote_addr: &str) -> Option<String> {
+        if let Some(existing) = self.dns_cache.get(remote_addr) {
+            return existing.clone();
+        }
+
+        let resolved = reverse_dns_lookup(remote_addr);
+        self.dns_cache
+            .insert(remote_addr.to_string(), resolved.clone());
+        resolved
+    }
+
+    fn known_service_name(
+        &self,
+        hostname: Option<&str>,
+        remote_addr: &str,
+        remote_port: u16,
+    ) -> Option<String> {
+        if let Some(host) = hostname {
+            let lower = host.to_ascii_lowercase();
+            if let Some(name) = self.known_services.get(&lower) {
+                return Some((*name).to_string());
+            }
+            if lower.ends_with(".github.com") {
+                return Some("GitHub".to_string());
+            }
+            if lower.ends_with(".openai.com") {
+                return Some("OpenAI".to_string());
+            }
+            if lower.ends_with(".anthropic.com") {
+                return Some("Anthropic API".to_string());
+            }
+        }
+
+        match (remote_addr, remote_port) {
+            (_, 443) if remote_addr.starts_with("140.82.") => Some("GitHub".to_string()),
+            (_, 443) if remote_addr.starts_with("104.18.") => Some("Cloudflare-hosted API".to_string()),
+            (_, 443) if remote_addr.starts_with("13.107.") => Some("Microsoft service".to_string()),
+            _ => None,
+        }
     }
 
     fn suspicious_reasons(&self, conn: &NetConnection, process_cmdline: &str) -> Vec<&'static str> {
@@ -151,6 +231,38 @@ impl EgressMonitor {
                 let prefix = item.trim_end_matches('*');
                 addr == prefix || addr.starts_with(prefix)
             })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DestinationClass {
+    KnownGood,
+    Unknown,
+    KnownBad,
+}
+
+impl DestinationClass {
+    fn paint_label(self) -> String {
+        match self {
+            DestinationClass::KnownGood => Color::Green.bold().paint("KNOWN_GOOD").to_string(),
+            DestinationClass::Unknown => Color::Yellow.bold().paint("UNKNOWN").to_string(),
+            DestinationClass::KnownBad => Color::Red.bold().paint("KNOWN_BAD").to_string(),
+        }
+    }
+
+    fn threat_level(self) -> ThreatLevel {
+        match self {
+            DestinationClass::KnownGood => ThreatLevel::Green,
+            DestinationClass::Unknown => ThreatLevel::Yellow,
+            DestinationClass::KnownBad => ThreatLevel::Red,
+        }
+    }
+
+    fn event_type(self) -> EventType {
+        match self {
+            DestinationClass::KnownBad => EventType::NetworkSuspicious,
+            DestinationClass::KnownGood | DestinationClass::Unknown => EventType::NetworkNewConnection,
+        }
     }
 }
 
@@ -241,4 +353,61 @@ fn inode_to_process() -> HashMap<u64, (i32, String, String)> {
     }
 
     map
+}
+
+fn format_hostname_suffix(hostname: &Option<String>) -> String {
+    match hostname {
+        Some(host) => format!(" ({host})"),
+        None => String::new(),
+    }
+}
+
+fn known_services_map() -> HashMap<String, &'static str> {
+    HashMap::from([
+        ("api.anthropic.com".to_string(), "Anthropic API"),
+        ("api.openai.com".to_string(), "OpenAI API"),
+        ("github.com".to_string(), "GitHub"),
+        ("api.github.com".to_string(), "GitHub API"),
+        ("raw.githubusercontent.com".to_string(), "GitHub Raw"),
+    ])
+}
+
+fn reverse_dns_lookup(remote_addr: &str) -> Option<String> {
+    let ipv4: Ipv4Addr = remote_addr.parse().ok()?;
+    let octets = ipv4.octets();
+    let mut addr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as u16,
+        sin_port: 0,
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_be_bytes(octets),
+        },
+        sin_zero: [0; 8],
+    };
+
+    let mut host_buf = [0i8; libc::NI_MAXHOST as usize];
+    let rc = unsafe {
+        libc::getnameinfo(
+            (&mut addr as *mut libc::sockaddr_in).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            host_buf.as_mut_ptr(),
+            host_buf.len() as libc::socklen_t,
+            std::ptr::null_mut(),
+            0,
+            libc::NI_NAMEREQD,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+
+    let host = unsafe { CStr::from_ptr(host_buf.as_ptr()) }
+        .to_str()
+        .ok()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }
