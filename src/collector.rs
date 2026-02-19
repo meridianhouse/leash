@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
-use tracing::warn;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 struct ProcessSnapshot {
@@ -101,6 +101,41 @@ impl ProcessCollector {
         let ancestry = self.build_ancestry_chain(pid, all, ai_roots);
         let ancestry_names: Vec<String> = ancestry.iter().map(|(_, name)| name.clone()).collect();
         let ancestry_text = ancestry_names.join(" -> ");
+
+        if let Some(entry) = self.match_allow_list(
+            &snapshot.info.name,
+            &snapshot.info.cmdline,
+            &snapshot.info.exe,
+        ) {
+            let reason = if entry.reason.trim().is_empty() {
+                format!("matched allow_list entry '{}'", entry.name)
+            } else {
+                entry.reason.clone()
+            };
+            info!(
+                pid = snapshot.info.pid,
+                process = %snapshot.info.name,
+                allow_name = %entry.name,
+                allow_reason = %reason,
+                "allowed process observed; suppressing alert delivery"
+            );
+
+            let mut event = self.make_event(
+                EventType::ProcessNew,
+                ThreatLevel::Green,
+                format!(
+                    "Allowed process observed: {} (pid={}) | ancestry: {}",
+                    snapshot.info.name, snapshot.info.pid, ancestry_text
+                ),
+                snapshot,
+                all,
+            );
+            event.allowed = true;
+            event.allowed_reason = Some(reason);
+            events.push(event);
+            return events;
+        }
+
         let is_descendant = ancestry.len() > 1;
         let process_level = if snapshot.is_ai_agent {
             ThreatLevel::Orange
@@ -344,6 +379,23 @@ impl ProcessCollector {
         cmdline_needles
             .iter()
             .any(|needle| cmdline.contains(needle) || exe.contains(needle))
+    }
+
+    fn match_allow_list<'a>(
+        &'a self,
+        name: &str,
+        cmdline: &str,
+        exe: &str,
+    ) -> Option<&'a crate::config::AllowListEntry> {
+        let name = name.to_ascii_lowercase();
+        let cmdline = cmdline.to_ascii_lowercase();
+        let exe = exe.to_ascii_lowercase();
+
+        self.cfg.allow_list.iter().find(|entry| {
+            let needle = entry.name.trim().to_ascii_lowercase();
+            !needle.is_empty()
+                && (name.contains(&needle) || cmdline.contains(&needle) || exe.contains(&needle))
+        })
     }
 
     fn read_open_fds(&self, pid: i32) -> Vec<String> {
@@ -642,5 +694,40 @@ mod tests {
     fn non_ai_process_is_not_flagged() {
         let collector = collector();
         assert!(!collector.is_ai_agent("sshd", "sshd: ryan", "/usr/sbin/sshd"));
+    }
+
+    #[test]
+    fn allow_list_match_detects_name_or_cmdline() {
+        let mut cfg = Config::default();
+        cfg.allow_list.push(crate::config::AllowListEntry {
+            name: "trusted-helper".to_string(),
+            reason: "approved for local automation".to_string(),
+        });
+        let (tx, _) = broadcast::channel::<SecurityEvent>(4);
+        let collector = ProcessCollector::new(cfg, tx);
+
+        assert!(
+            collector
+                .match_allow_list(
+                    "trusted-helper",
+                    "trusted-helper --run",
+                    "/usr/bin/trusted-helper"
+                )
+                .is_some()
+        );
+        assert!(
+            collector
+                .match_allow_list(
+                    "python3",
+                    "python3 /opt/trusted-helper/run.py",
+                    "/usr/bin/python3"
+                )
+                .is_some()
+        );
+        assert!(
+            collector
+                .match_allow_list("sshd", "sshd: ryan", "/usr/sbin/sshd")
+                .is_none()
+        );
     }
 }

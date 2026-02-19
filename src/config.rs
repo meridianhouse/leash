@@ -19,11 +19,21 @@ pub struct Config {
     #[serde(default)]
     pub protected_processes: Vec<String>,
     #[serde(default)]
+    pub allow_list: Vec<AllowListEntry>,
+    #[serde(default)]
     pub response: ResponseConfig,
     #[serde(default)]
     pub alerts: AlertsConfig,
     #[serde(default)]
     pub egress: EgressConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AllowListEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +122,7 @@ impl Default for Config {
                 "codex".into(),
                 "leash".into(),
             ],
+            allow_list: Vec::new(),
             response: ResponseConfig::default(),
             alerts: AlertsConfig::default(),
             egress: EgressConfig::default(),
@@ -192,6 +203,11 @@ impl Config {
     fn validate(&self) -> Result<()> {
         validate_level(&self.alerts.min_severity, "alerts.min_severity")?;
         validate_level(&self.response.stop_min_level, "response.stop_min_level")?;
+        for (index, entry) in self.allow_list.iter().enumerate() {
+            if entry.name.trim().is_empty() {
+                bail!("allow_list[{index}].name cannot be empty");
+            }
+        }
         Ok(())
     }
 
@@ -451,6 +467,9 @@ legitimate_ai_parents: [bash, tmux]
 sensitive_path_keywords: [token, secret]
 fim_paths: [/etc/passwd, ~/.ssh]
 protected_processes: [systemd, leash]
+allow_list:
+  - name: codex
+    reason: approved local dev agent
 response:
   enable_sigstop: true
   stop_min_level: red
@@ -479,6 +498,9 @@ egress:
 
         let parsed: Config = serde_yaml::from_str(yaml).expect("all-fields config should parse");
         assert_eq!(parsed.monitor_interval_ms, 250);
+        assert_eq!(parsed.allow_list.len(), 1);
+        assert_eq!(parsed.allow_list[0].name, "codex");
+        assert_eq!(parsed.allow_list[0].reason, "approved local dev agent");
         assert_eq!(parsed.response.stop_min_level, "red");
         assert_eq!(parsed.alerts.min_severity, "orange");
         assert_eq!(parsed.alerts.rate_limit_seconds, 120);

@@ -51,6 +51,8 @@ protected_processes:
   - codex
   - leash
 
+allow_list: []
+
 response:
   enable_sigstop: false
   stop_min_level: orange

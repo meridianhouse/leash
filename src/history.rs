@@ -10,12 +10,7 @@ struct HistoryRecord {
     severity: String,
     event_type: String,
     narrative: String,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ExportFormat {
-    Json,
-    Csv,
+    allowed: bool,
 }
 
 #[derive(Debug)]
@@ -58,12 +53,13 @@ pub fn print_history(
     } else {
         for record in records {
             println!(
-                "{} [{}] {} {}",
+                "{} [{}]{} {} {}",
                 record
                     .timestamp
                     .with_timezone(&chrono::Local)
                     .format("%Y-%m-%d %H:%M:%S"),
                 record.severity.to_uppercase(),
+                if record.allowed { " [ALLOWED]" } else { "" },
                 record.event_type,
                 record.narrative
             );
@@ -73,55 +69,12 @@ pub fn print_history(
     Ok(())
 }
 
-pub fn export_events(
-    format: ExportFormat,
+pub fn load_security_events(
     last: Option<&str>,
     severity: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<SecurityEvent>> {
     let conn = open_db()?;
-    let events = query_security_events(&conn, last, severity, None)?;
-
-    match format {
-        ExportFormat::Json => {
-            for event in events {
-                println!("{}", serde_json::to_string(&event)?);
-            }
-        }
-        ExportFormat::Csv => {
-            println!("timestamp,event_type,threat_level,narrative,pid,process_name");
-            for event in events {
-                let pid = event
-                    .process
-                    .as_ref()
-                    .map(|process| process.pid.to_string())
-                    .unwrap_or_default();
-                let process_name = event
-                    .process
-                    .as_ref()
-                    .map(|process| process.name.clone())
-                    .unwrap_or_default();
-                println!(
-                    "{},{},{},{},{},{}",
-                    csv_cell(&event.timestamp.to_rfc3339()),
-                    csv_cell(&event.event_type.to_string()),
-                    csv_cell(threat_level_as_str(event.threat_level)),
-                    csv_cell(&event.narrative),
-                    csv_cell(&pid),
-                    csv_cell(&process_name),
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn csv_cell(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
+    query_security_events(&conn, last, severity, None)
 }
 
 pub fn open_db() -> anyhow::Result<Connection> {
@@ -186,12 +139,15 @@ fn query_records(
     let mut records = Vec::with_capacity(rows.len());
 
     for row in rows {
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&row.timestamp)?.with_timezone(&chrono::Utc);
+        let event = serde_json::from_str::<SecurityEvent>(&row.payload_json)?;
+        let timestamp =
+            chrono::DateTime::parse_from_rfc3339(&row.timestamp)?.with_timezone(&chrono::Utc);
         records.push(HistoryRecord {
             timestamp,
             severity: row.severity,
             event_type: row.event_type,
             narrative: row.narrative,
+            allowed: event.allowed,
         });
     }
 
@@ -306,7 +262,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("leash-history-{label}-{}-{nanos}.db", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "leash-history-{label}-{}-{nanos}.db",
+            std::process::id()
+        ))
     }
 
     fn sample_event(
@@ -403,13 +362,5 @@ mod tests {
         assert_eq!(rows[0].narrative, "yellow event");
 
         let _ = std::fs::remove_file(db_path);
-    }
-
-    #[test]
-    fn csv_cell_escapes_commas_quotes_and_newlines() {
-        assert_eq!(csv_cell("plain"), "plain");
-        assert_eq!(csv_cell("a,b"), "\"a,b\"");
-        assert_eq!(csv_cell("a\"b"), "\"a\"\"b\"");
-        assert_eq!(csv_cell("a\nb"), "\"a\nb\"");
     }
 }

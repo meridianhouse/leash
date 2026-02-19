@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 pub struct AlertDispatcher {
     cfg: Config,
@@ -46,6 +46,15 @@ impl AlertDispatcher {
                 && let Err(err) = self.write_local_log(&event)
             {
                 error!(?err, "failed to write alert log");
+            }
+
+            if event.allowed {
+                info!(
+                    event_type = %event.event_type,
+                    reason = %event.allowed_reason.as_deref().unwrap_or("allow_list"),
+                    "skipping alerts for allow-listed event"
+                );
+                continue;
             }
 
             if event.threat_level < self.min_severity || !self.should_send_for_event_type(&event) {

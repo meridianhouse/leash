@@ -115,6 +115,10 @@ pub struct SecurityEvent {
     pub mitre: Vec<MitreMapping>,
     pub enrichment: Option<ProcessEnrichment>,
     pub response_taken: Option<String>,
+    #[serde(default)]
+    pub allowed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_reason: Option<String>,
 }
 
 impl SecurityEvent {
@@ -130,6 +134,8 @@ impl SecurityEvent {
             mitre: Vec::new(),
             enrichment: None,
             response_taken: None,
+            allowed: false,
+            allowed_reason: None,
         }
     }
 }

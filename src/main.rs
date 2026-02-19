@@ -8,6 +8,7 @@ mod config;
 mod display;
 mod ebpf;
 mod egress;
+mod export;
 mod fim;
 mod history;
 mod mitre;
@@ -52,6 +53,14 @@ async fn main() -> Result<(), app::DynError> {
         Commands::Status => print_status(cli.json)?,
         Commands::History { last, severity } => {
             history::print_history(last.as_deref(), severity.as_deref(), cli.json)?;
+        }
+        Commands::Export {
+            format,
+            last,
+            severity,
+        } => {
+            let export_format = export::ExportFormat::parse(&format)?;
+            export::export_events(export_format, last.as_deref(), severity.as_deref())?;
         }
         Commands::Stop => stop_agent(cli.json)?,
     }

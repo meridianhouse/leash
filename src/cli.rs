@@ -41,6 +41,15 @@ pub enum Commands {
         )]
         severity: Option<String>,
     },
+    #[command(about = "Export stored history events")]
+    Export {
+        #[arg(long, default_value = "json", value_parser = ["json", "csv"])]
+        format: String,
+        #[arg(long, help = "Time window to query (supported: 1h, 24h)")]
+        last: Option<String>,
+        #[arg(long, help = "Filter by severity (green, yellow, orange, red)")]
+        severity: Option<String>,
+    },
     #[command(about = "Stop Leash daemon")]
     Stop,
 }
