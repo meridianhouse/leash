@@ -4,6 +4,7 @@ use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, Th
 use procfs::process::Process;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::Path;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -393,8 +394,23 @@ impl ProcessCollector {
 
         self.cfg.allow_list.iter().find(|entry| {
             let needle = entry.name.trim().to_ascii_lowercase();
-            !needle.is_empty()
-                && (name.contains(&needle) || cmdline.contains(&needle) || exe.contains(&needle))
+            if needle.is_empty() {
+                return false;
+            }
+
+            if name == needle {
+                return true;
+            }
+
+            if cmdline
+                .split_whitespace()
+                .map(normalize_exec_token)
+                .any(|token| token == needle)
+            {
+                return true;
+            }
+
+            normalize_exec_token(&exe) == needle
         })
     }
 
@@ -650,6 +666,15 @@ fn parse_ipv4_octets(host: &str) -> Option<(u8, u8, u8, u8)> {
     Some((a, b, c, d))
 }
 
+fn normalize_exec_token(input: &str) -> String {
+    let token = input.trim().trim_matches('"').trim_matches('\'');
+    Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(token)
+        .to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProcessCollector;
@@ -697,11 +722,15 @@ mod tests {
     }
 
     #[test]
-    fn allow_list_match_detects_name_or_cmdline() {
+    fn allow_list_match_requires_exact_token() {
         let mut cfg = Config::default();
         cfg.allow_list.push(crate::config::AllowListEntry {
             name: "trusted-helper".to_string(),
             reason: "approved for local automation".to_string(),
+        });
+        cfg.allow_list.push(crate::config::AllowListEntry {
+            name: "code".to_string(),
+            reason: "exact match only".to_string(),
         });
         let (tx, _) = broadcast::channel::<SecurityEvent>(4);
         let collector = ProcessCollector::new(cfg, tx);
@@ -722,8 +751,23 @@ mod tests {
                     "python3 /opt/trusted-helper/run.py",
                     "/usr/bin/python3"
                 )
+                .is_none()
+        );
+        assert!(
+            collector
+                .match_allow_list(
+                    "python3",
+                    "/usr/local/bin/trusted-helper --run",
+                    "/usr/bin/python3"
+                )
                 .is_some()
         );
+        assert!(
+            collector
+                .match_allow_list("codex", "codex run", "/usr/local/bin/codex")
+                .is_none()
+        );
+        assert!(collector.match_allow_list("code", "code .", "/usr/bin/code").is_some());
         assert!(
             collector
                 .match_allow_list("sshd", "sshd: ryan", "/usr/sbin/sshd")
