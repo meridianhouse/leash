@@ -123,7 +123,11 @@ pub fn store_event_with_limit(event: &SecurityEvent, max_history_mb: u64) -> any
     insert_event(&conn, event, max_history_mb)
 }
 
-fn insert_event(conn: &Connection, event: &SecurityEvent, max_history_mb: u64) -> anyhow::Result<()> {
+fn insert_event(
+    conn: &Connection,
+    event: &SecurityEvent,
+    max_history_mb: u64,
+) -> anyhow::Result<()> {
     enforce_db_size_limit(conn, max_history_mb)?;
     let db_file = db_path()
         .map(|p| p.display().to_string())

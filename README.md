@@ -53,7 +53,7 @@ leash stop
 Avoid `curl | bash`. Use download-then-verify-then-execute:
 
 ```bash
-curl -fsSLo /tmp/leash-install.sh https://leash.meridianhouse.tech/install.sh
+curl -fsSLo /tmp/leash-install.sh https://meridianhouse.tech/leash/install.sh
 # Verify the installer checksum from a trusted release note before running:
 sha256sum /tmp/leash-install.sh
 bash /tmp/leash-install.sh
@@ -245,7 +245,7 @@ MIT — because security tools should be free.
 
 ## Links
 
-- 🌐 [leash.meridianhouse.tech](https://leash.meridianhouse.tech)
+- 🌐 [meridianhouse.tech/leash](https://meridianhouse.tech/leash)
 - 🐙 [GitHub](https://github.com/meridianhouse/leash)
 - 🏢 [Meridian House](https://meridianhouse.tech)
 

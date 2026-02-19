@@ -8,7 +8,7 @@
 - [ ] `leash scan` shows active agents
 - [ ] `leash watch --json` produces valid NDJSON
 - [ ] README is up to date with all features
-- [ ] Landing page deployed to leash.meridianhouse.tech
+- [ ] Landing page deployed to meridianhouse.tech/leash
 - [ ] Twitter thread drafted and approved
 - [ ] HN post drafted and approved
 - [ ] r/netsec post drafted and approved
@@ -18,7 +18,7 @@
 
 - [ ] Tag release: `git tag v0.1.0`
 - [ ] Push tag: `git push origin v0.1.0`
-- [ ] Publish landing page to leash.meridianhouse.tech
+- [ ] Publish landing page to meridianhouse.tech/leash
 - [ ] Post HN Show HN
 - [ ] Post r/netsec
 - [ ] Tweet thread from @Meridianhousehq

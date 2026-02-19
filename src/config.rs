@@ -274,10 +274,13 @@ impl Config {
             errors.push("alerts.discord.enabled is true but alerts.discord.url is empty".into());
         }
         if self.alerts.telegram.enabled && self.alerts.telegram.token.trim().is_empty() {
-            errors.push("alerts.telegram.enabled is true but alerts.telegram.token is empty".into());
+            errors
+                .push("alerts.telegram.enabled is true but alerts.telegram.token is empty".into());
         }
         if self.alerts.telegram.enabled && self.alerts.telegram.chat_id.trim().is_empty() {
-            errors.push("alerts.telegram.enabled is true but alerts.telegram.chat_id is empty".into());
+            errors.push(
+                "alerts.telegram.enabled is true but alerts.telegram.chat_id is empty".into(),
+            );
         }
 
         for (name, url) in [
@@ -603,7 +606,10 @@ fn is_valid_http_or_https_url(raw: &str) -> bool {
 }
 
 fn has_enabled_alert_sink(alerts: &AlertsConfig) -> bool {
-    alerts.json_log.enabled || alerts.slack.enabled || alerts.discord.enabled || alerts.telegram.enabled
+    alerts.json_log.enabled
+        || alerts.slack.enabled
+        || alerts.discord.enabled
+        || alerts.telegram.enabled
 }
 
 fn is_valid_telegram_token(raw: &str) -> bool {
@@ -785,7 +791,10 @@ alerts:
 "#,
         )
         .expect_err("interval below 100ms should fail validation");
-        assert!(err.to_string().contains("monitor_interval_ms must be at least 100"));
+        assert!(
+            err.to_string()
+                .contains("monitor_interval_ms must be at least 100")
+        );
     }
 
     #[test]
@@ -799,7 +808,10 @@ alerts:
 "#,
         )
         .expect_err("invalid scheme should fail validation");
-        assert!(err.to_string().contains("alerts.slack.url must start with http:// or https://"));
+        assert!(
+            err.to_string()
+                .contains("alerts.slack.url must start with http:// or https://")
+        );
     }
 
     #[test]
@@ -818,6 +830,9 @@ alerts:
 "#,
         )
         .expect_err("all alert sinks disabled should fail validation");
-        assert!(err.to_string().contains("alerts config must enable at least one sink"));
+        assert!(
+            err.to_string()
+                .contains("alerts config must enable at least one sink")
+        );
     }
 }

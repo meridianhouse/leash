@@ -947,7 +947,9 @@ fn dedup_key(event: &SecurityEvent) -> DedupKey {
         .as_ref()
         .map(|proc| proc.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let narrative_hash = blake3::hash(event.narrative.as_bytes()).to_hex().to_string();
+    let narrative_hash = blake3::hash(event.narrative.as_bytes())
+        .to_hex()
+        .to_string();
 
     DedupKey {
         event_type: event.event_type,
@@ -1294,9 +1296,11 @@ mod tests {
         std::thread::sleep(Duration::from_secs(2));
         let (_is_duplicate, summaries) = dispatcher.process_deduplication(&event);
         assert_eq!(summaries.len(), 1);
-        assert!(summaries[0]
-            .narrative
-            .contains("Suppressed 1 duplicate alerts for ["));
+        assert!(
+            summaries[0]
+                .narrative
+                .contains("Suppressed 1 duplicate alerts for [")
+        );
     }
 
     #[test]
@@ -1324,7 +1328,10 @@ mod tests {
         let pid = std::process::id() as i32;
         let name = std::env::current_exe()
             .ok()
-            .and_then(|path| path.file_name().map(|entry| entry.to_string_lossy().to_string()))
+            .and_then(|path| {
+                path.file_name()
+                    .map(|entry| entry.to_string_lossy().to_string())
+            })
             .unwrap_or_else(|| "test-bin".to_string());
         let context = process_tree_context(pid, &name).expect("context should resolve");
         assert!(context.contains("Process:"));

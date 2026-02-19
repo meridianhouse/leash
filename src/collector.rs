@@ -222,9 +222,7 @@ impl ProcessCollector {
 
         let parent = all.get(&snapshot.info.ppid);
         let parent_name = parent.map(|p| p.info.name.as_str()).unwrap_or_default();
-        let parent_cmdline = parent
-            .map(|p| p.info.cmdline.as_str())
-            .unwrap_or_default();
+        let parent_cmdline = parent.map(|p| p.info.cmdline.as_str()).unwrap_or_default();
         let dangerous_hits = detect_dangerous_commands_with_context(
             &snapshot.info.cmdline,
             &snapshot.enrichment.working_dir,
@@ -1290,8 +1288,8 @@ fn is_rmm_tool_name(process_name: &str) -> bool {
         "connectwise",
         "rustdesk",
     ]
-        .iter()
-        .any(|needle| process_name.contains(needle))
+    .iter()
+    .any(|needle| process_name.contains(needle))
 }
 
 fn has_suspicious_rmm_parent(parent_name: &str) -> bool {
@@ -1301,7 +1299,10 @@ fn has_suspicious_rmm_parent(parent_name: &str) -> bool {
 }
 
 fn is_shell_name(name: &str) -> bool {
-    matches!(name, "bash" | "sh" | "zsh" | "fish" | "dash" | "csh" | "tcsh")
+    matches!(
+        name,
+        "bash" | "sh" | "zsh" | "fish" | "dash" | "csh" | "tcsh"
+    )
 }
 
 fn is_package_manager_name(name: &str) -> bool {
@@ -1312,7 +1313,8 @@ fn is_package_manager_name(name: &str) -> bool {
 
 fn contains_hidden_unicode(raw: &str) -> bool {
     raw.chars().any(|ch| {
-        matches!(ch, '\u{200b}' | '\u{200d}' | '\u{feff}') || ('\u{e000}'..='\u{f8ff}').contains(&ch)
+        matches!(ch, '\u{200b}' | '\u{200d}' | '\u{feff}')
+            || ('\u{e000}'..='\u{f8ff}').contains(&ch)
     })
 }
 
@@ -1426,8 +1428,7 @@ fn writes_authorized_keys(cmdline: &str) -> bool {
         || cmdline.contains("cp ")
         || cmdline.contains("mv ")
         || cmdline.contains("install "))
-        && (cmdline.contains("~/.ssh/authorized_keys")
-            || cmdline.contains("/.ssh/authorized_keys"))
+        && (cmdline.contains("~/.ssh/authorized_keys") || cmdline.contains("/.ssh/authorized_keys"))
 }
 
 fn normalize_exec_token(input: &str) -> String {
@@ -1517,7 +1518,8 @@ mod tests {
 
     #[test]
     fn strips_zero_width_characters_before_detection() {
-        let hits = detect_dangerous_commands("curl\u{200d} https://example.com/install.sh | sh", "/");
+        let hits =
+            detect_dangerous_commands("curl\u{200d} https://example.com/install.sh | sh", "/");
         assert!(hits.contains(&"download_pipe_shell"));
     }
 

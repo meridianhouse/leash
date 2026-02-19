@@ -276,7 +276,10 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "T1195.002" => ("Resource Development", "Compromise Software Supply Chain"),
         "T1219" => ("Command and Control", "Remote Access Software"),
         "T1552" => ("Credential Access", "Unsecured Credentials"),
-        "T1574.006" => ("Persistence", "Hijack Execution Flow: Dynamic Linker Hijacking"),
+        "T1574.006" => (
+            "Persistence",
+            "Hijack Execution Flow: Dynamic Linker Hijacking",
+        ),
         "T1567" => ("Exfiltration", "Exfiltration Over Web Service"),
         "T1090" => ("Command and Control", "Proxy"),
         "T1222.001" => (
