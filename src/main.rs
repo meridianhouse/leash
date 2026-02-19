@@ -6,6 +6,7 @@ mod cli;
 mod collector;
 mod config;
 mod display;
+mod ebpf;
 mod egress;
 mod fim;
 mod mitre;
@@ -24,6 +25,9 @@ use clap::Parser;
 async fn main() -> Result<(), app::DynError> {
     init_tracing();
     let cli = Cli::parse();
+    if cli.ebpf {
+        println!("eBPF coming in v0.2");
+    }
 
     match cli.command {
         Commands::Init => init_config(cli.json)?,

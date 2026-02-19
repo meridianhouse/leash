@@ -10,6 +10,9 @@ pub struct Cli {
     #[arg(long, global = true, help = "Machine-readable JSON output")]
     pub json: bool,
 
+    #[arg(long, global = true, help = "Enable eBPF kernel monitoring (preview)")]
+    pub ebpf: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
