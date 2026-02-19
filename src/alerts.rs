@@ -20,6 +20,7 @@ pub struct AlertDispatcher {
 }
 
 impl AlertDispatcher {
+    /// Creates an alert dispatcher configured for severity filtering, rate limiting, and sink delivery.
     pub fn new(
         cfg: Config,
         rx: broadcast::Receiver<SecurityEvent>,
@@ -34,6 +35,7 @@ impl AlertDispatcher {
         })
     }
 
+    /// Consumes security events from the channel and forwards eligible alerts to configured sinks.
     pub async fn run(mut self) {
         loop {
             let event = match self.rx.recv().await {
@@ -359,6 +361,7 @@ fn discord_color(level: ThreatLevel) -> u32 {
     }
 }
 
+/// Escapes Telegram HTML meta-characters in an alert field value.
 pub fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -410,6 +413,7 @@ fn scrub_event(event: &SecurityEvent) -> SecurityEvent {
     out
 }
 
+/// Redacts common API keys and credential assignments from untrusted text.
 pub fn scrub_secrets(input: &str) -> String {
     let mut output = redact_prefixed_alnum_secret(input, "sk-", 20);
     for prefix in ["AKIA", "ABIA", "ACCA", "ASIA"] {

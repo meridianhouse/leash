@@ -24,6 +24,7 @@ pub struct ProcessCollector {
 }
 
 impl ProcessCollector {
+    /// Builds a process collector that publishes inferred [`SecurityEvent`] values over a broadcast channel.
     pub fn new(cfg: Config, tx: broadcast::Sender<SecurityEvent>) -> Self {
         Self {
             cfg,
@@ -33,6 +34,7 @@ impl ProcessCollector {
         }
     }
 
+    /// Starts continuous process collection and emits events on each polling interval.
     pub async fn run(mut self) {
         loop {
             self.collect_once();
@@ -489,6 +491,7 @@ fn parse_status_kb(raw: &str) -> Option<u64> {
     raw.split_whitespace().next()?.parse::<u64>().ok()
 }
 
+/// Redacts common secret formats from arbitrary text before logging or alerting.
 pub fn scrub_secrets(input: &str) -> String {
     let mut output = redact_prefixed_alnum_secret(input, "sk-", 20);
     for prefix in ["AKIA", "ABIA", "ACCA", "ASIA"] {
@@ -798,6 +801,7 @@ fn normalize_exec_token(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Returns true when an allow-list entry matches a process name, command token, or executable path.
 pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe: &str) -> bool {
     let needle = entry_name.trim().to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
