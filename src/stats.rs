@@ -1,12 +1,15 @@
 use crate::models::{SecurityEvent, ThreatLevel};
+use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use tracing::warn;
 
-const STATS_FILE: &str = "/tmp/leash-stats.json";
 static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,17 +52,75 @@ pub async fn track_events(mut rx: broadcast::Receiver<SecurityEvent>) -> anyhow:
 }
 
 pub fn load_snapshot() -> anyhow::Result<Option<StatsSnapshot>> {
-    if !Path::new(STATS_FILE).exists() {
+    let path = stats_file_path()?;
+    if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(STATS_FILE)?;
+    reject_symlink(&path)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("stats path is not a regular file: {}", path.display());
+    }
+    if metadata.uid() != current_uid() {
+        anyhow::bail!("stats file {} is not owned by current user", path.display());
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
     let snapshot = serde_json::from_str::<StatsSnapshot>(&content)?;
     Ok(Some(snapshot))
 }
 
 fn write_snapshot(snapshot: &StatsSnapshot) -> anyhow::Result<()> {
-    std::fs::write(STATS_FILE, serde_json::to_string_pretty(snapshot)?)?;
+    let path = stats_file_path()?;
+    if let Some(parent) = path.parent() {
+        ensure_state_dir(parent)?;
+    }
+    reject_symlink(&path)?;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    file.write_all(serde_json::to_string_pretty(snapshot)?.as_bytes())?;
+    file.sync_all()?;
     Ok(())
+}
+
+fn stats_file_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set"))?;
+    let home = home.trim();
+    if home.is_empty() {
+        anyhow::bail!("HOME is empty");
+    }
+    Ok(PathBuf::from(home).join(".local/state/leash/stats.json"))
+}
+
+fn ensure_state_dir(path: &Path) -> anyhow::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)?;
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> anyhow::Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("refusing to use symlink for stats file: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid is thread-safe and has no preconditions.
+    unsafe { libc::geteuid() }
 }
 
 #[derive(Default)]

@@ -48,6 +48,17 @@ leash status
 leash stop
 ```
 
+## Secure Installer Usage
+
+Avoid `curl | bash`. Use download-then-verify-then-execute:
+
+```bash
+curl -fsSLo /tmp/leash-install.sh https://leash.meridianhouse.tech/install.sh
+# Verify the installer checksum from a trusted release note before running:
+sha256sum /tmp/leash-install.sh
+bash /tmp/leash-install.sh
+```
+
 ## Docker
 
 Run Leash in a container with host namespace visibility:

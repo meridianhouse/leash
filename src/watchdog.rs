@@ -4,7 +4,6 @@ use crate::models::{EventType, SecurityEvent, ThreatLevel};
 use crate::stats;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, warn};
@@ -24,14 +23,14 @@ pub struct Watchdog {
 impl Watchdog {
     pub fn new(cfg: Config, tx: broadcast::Sender<SecurityEvent>) -> Self {
         let exe_path = "/proc/self/exe".to_string();
-        let baseline_hash = compute_file_sha256(&exe_path);
+        let baseline_hash = compute_file_blake3(&exe_path);
         if let Some(hash) = baseline_hash.as_deref()
             && let Err(err) = persist_integrity_hash(hash)
         {
             warn!(?err, "failed to persist binary integrity baseline");
         }
         let config_path = default_config_path();
-        let config_hash = compute_file_sha256(&config_path);
+        let config_hash = compute_file_blake3(&config_path);
         let service_path = find_service_file();
         let (service_hash, service_restart) = service_path
             .as_deref()
@@ -83,7 +82,7 @@ impl Watchdog {
     }
 
     fn check_binary_tamper(&mut self) -> Option<SecurityEvent> {
-        let current_hash = compute_file_sha256(&self.exe_path)?;
+        let current_hash = compute_file_blake3(&self.exe_path)?;
         let baseline = self.baseline_hash.clone()?;
         if current_hash == baseline {
             return None;
@@ -102,7 +101,7 @@ impl Watchdog {
     }
 
     fn check_config_tamper(&mut self) -> Option<SecurityEvent> {
-        let current_hash = compute_file_sha256(&self.config_path);
+        let current_hash = compute_file_blake3(&self.config_path);
         if current_hash == self.config_hash {
             return None;
         }
@@ -125,11 +124,10 @@ impl Watchdog {
     }
 }
 
-fn compute_file_sha256(path: impl AsRef<std::path::Path>) -> Option<String> {
+fn compute_file_blake3(path: impl AsRef<std::path::Path>) -> Option<String> {
     let path = path.as_ref();
-    run_digest_command("sha256sum", &[path])
-        .or_else(|| run_shasum_command(path))
-        .map(|digest| digest.to_ascii_lowercase())
+    let contents = fs::read(path).ok()?;
+    Some(blake3::hash(&contents).to_hex().to_string())
 }
 
 fn persist_integrity_hash(hash: &str) -> std::io::Result<()> {
@@ -143,7 +141,7 @@ fn persist_integrity_hash(hash: &str) -> std::io::Result<()> {
 fn integrity_hash_path() -> std::io::Result<PathBuf> {
     let home = std::env::var("HOME")
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".local/state/leash/integrity.sha256"))
+    Ok(PathBuf::from(home).join(".local/state/leash/integrity.blake3"))
 }
 
 fn default_config_path() -> PathBuf {
@@ -152,34 +150,6 @@ fn default_config_path() -> PathBuf {
         return PathBuf::from("/etc/leash/config.yaml");
     }
     PathBuf::from(home).join(".config/leash/config.yaml")
-}
-
-fn run_digest_command(cmd: &str, args: &[&std::path::Path]) -> Option<String> {
-    let output = Command::new(cmd).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    stdout
-        .split_whitespace()
-        .next()
-        .map(std::string::ToString::to_string)
-}
-
-fn run_shasum_command(path: &std::path::Path) -> Option<String> {
-    let output = Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    stdout
-        .split_whitespace()
-        .next()
-        .map(std::string::ToString::to_string)
 }
 
 fn find_service_file() -> Option<PathBuf> {
@@ -242,7 +212,11 @@ fn check_service_restart(
     );
 }
 
-fn send_self_tamper_alert(tx: &broadcast::Sender<SecurityEvent>, level: ThreatLevel, narrative: String) {
+fn send_self_tamper_alert(
+    tx: &broadcast::Sender<SecurityEvent>,
+    level: ThreatLevel,
+    narrative: String,
+) {
     let event = mitre::infer_and_tag(SecurityEvent::new(EventType::SelfTamper, level, narrative));
     if let Err(err) = tx.send(event) {
         stats::record_dropped_event();

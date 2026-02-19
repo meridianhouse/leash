@@ -13,24 +13,21 @@ use crate::stats;
 use crate::test_events::build_test_events;
 use crate::watchdog::Watchdog;
 use nix::libc;
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
 use nu_ansi_term::Color;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::net::Shutdown;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval, sleep};
 use tracing::{debug, error, info, warn};
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-static AUTH_STOP_ENABLED: AtomicBool = AtomicBool::new(false);
-static AUTH_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
-static UNAUTHORIZED_SIGTERM: AtomicBool = AtomicBool::new(false);
 
 pub fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -47,11 +44,6 @@ pub async fn run_agent(
     json_output: bool,
     dry_run: bool,
 ) -> Result<(), DynError> {
-    AUTH_STOP_ENABLED.store(!cfg.auth.stop_password_hash.trim().is_empty(), Ordering::SeqCst);
-    AUTH_STOP_REQUESTED.store(false, Ordering::SeqCst);
-    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
-    UNAUTHORIZED_SIGTERM.store(false, Ordering::SeqCst);
-
     ensure_single_instance()?;
     write_pid_file()?;
 
@@ -91,7 +83,7 @@ pub async fn run_agent(
     let watchdog_handle = tokio::spawn(async move { watchdog.run().await });
 
     info!("Leash is running. Press Ctrl-C to stop.");
-    wait_for_shutdown_signal(&event_tx).await?;
+    wait_for_shutdown_signal(&cfg, &event_tx).await?;
     info!("Shutdown requested.");
 
     collector_handle.abort();
@@ -110,29 +102,50 @@ pub async fn run_agent(
     Ok(())
 }
 
-async fn wait_for_shutdown_signal(event_tx: &broadcast::Sender<SecurityEvent>) -> Result<(), DynError> {
+async fn wait_for_shutdown_signal(
+    cfg: &Config,
+    event_tx: &broadcast::Sender<SecurityEvent>,
+) -> Result<(), DynError> {
     #[cfg(unix)]
     {
-        install_signal_handlers()?;
+        let expected_hash = cfg.auth.stop_password_hash.trim().to_string();
+        let socket_path = shutdown_socket_path()?;
+        let listener = bind_shutdown_socket(&socket_path)?;
+        let _socket_guard = ShutdownSocketGuard {
+            path: socket_path.clone(),
+        };
+
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
         loop {
-            if UNAUTHORIZED_SIGTERM.swap(false, Ordering::SeqCst) {
-                let event = mitre::infer_and_tag(SecurityEvent::new(
-                    EventType::SelfTamper,
-                    ThreatLevel::Red,
-                    "Unauthorized SIGTERM received while stop password is enabled".to_string(),
-                ));
-                if let Err(err) = event_tx.send(event) {
-                    stats::record_dropped_event();
-                    warn!(
-                        event_type = %err.0.event_type,
-                        "dropping event: broadcast channel full or closed"
-                    );
+            tokio::select! {
+                _ = sigint.recv() => {
+                    if expected_hash.is_empty() {
+                        break;
+                    }
+                    emit_ignored_signal_event(event_tx, "SIGINT");
+                }
+                _ = sigterm.recv() => {
+                    if expected_hash.is_empty() {
+                        break;
+                    }
+                    emit_ignored_signal_event(event_tx, "SIGTERM");
+                }
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((mut stream, _addr)) => {
+                            match handle_shutdown_auth_request(&mut stream, &expected_hash).await {
+                                Ok(true) => break,
+                                Ok(false) => {}
+                                Err(err) => warn!(?err, "failed to process shutdown auth request"),
+                            }
+                        }
+                        Err(err) => warn!(?err, "shutdown socket accept failed"),
+                    }
                 }
             }
-            if SHUTDOWN_REQUESTED.swap(false, Ordering::SeqCst) {
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
         }
         Ok(())
     }
@@ -145,41 +158,116 @@ async fn wait_for_shutdown_signal(event_tx: &broadcast::Sender<SecurityEvent>) -
 }
 
 #[cfg(unix)]
-extern "C" fn leash_signal_handler(sig: i32) {
-    match sig {
-        libc::SIGUSR1 => {
-            AUTH_STOP_REQUESTED.store(true, Ordering::SeqCst);
-        }
-        libc::SIGTERM => {
-            if AUTH_STOP_ENABLED.load(Ordering::SeqCst)
-                && !AUTH_STOP_REQUESTED.swap(false, Ordering::SeqCst)
-            {
-                UNAUTHORIZED_SIGTERM.store(true, Ordering::SeqCst);
-                return;
-            }
-            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
-        }
-        _ => {
-            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+fn bind_shutdown_socket(path: &Path) -> Result<UnixListener, DynError> {
+    if let Some(parent) = path.parent() {
+        create_runtime_dir(parent)?;
+    }
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+struct ShutdownSocketGuard {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for ShutdownSocketGuard {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            debug!(?err, "failed to remove shutdown socket");
         }
     }
 }
 
 #[cfg(unix)]
-fn install_signal_handlers() -> Result<(), DynError> {
-    let action = signal::SigAction::new(
-        signal::SigHandler::Handler(leash_signal_handler),
-        signal::SaFlags::SA_RESTART,
-        signal::SigSet::empty(),
-    );
-
-    // SAFETY: handler only updates an atomic flag and is async-signal-safe.
-    unsafe {
-        signal::sigaction(Signal::SIGINT, &action)?;
-        signal::sigaction(Signal::SIGTERM, &action)?;
-        signal::sigaction(Signal::SIGUSR1, &action)?;
+fn emit_ignored_signal_event(event_tx: &broadcast::Sender<SecurityEvent>, signal_name: &str) {
+    let event = mitre::infer_and_tag(SecurityEvent::new(
+        EventType::SelfTamper,
+        ThreatLevel::Red,
+        format!(
+            "Ignored {signal_name}; authenticated shutdown is required while stop password is enabled"
+        ),
+    ));
+    if let Err(err) = event_tx.send(event) {
+        stats::record_dropped_event();
+        warn!(
+            event_type = %err.0.event_type,
+            "dropping event: broadcast channel full or closed"
+        );
     }
+}
 
+#[cfg(unix)]
+async fn handle_shutdown_auth_request(
+    stream: &mut UnixStream,
+    expected_hash: &str,
+) -> Result<bool, DynError> {
+    let mut payload = Vec::new();
+    stream.read_to_end(&mut payload).await?;
+    let provided = String::from_utf8_lossy(&payload);
+    let provided_hash = provided.trim_end_matches(['\r', '\n']);
+    let authorized = provided_hash == expected_hash;
+    if authorized {
+        stream.write_all(b"OK\n").await?;
+    } else {
+        stream.write_all(b"ERR\n").await?;
+    }
+    let _ = stream.shutdown().await;
+    Ok(authorized)
+}
+
+fn shutdown_socket_path() -> Result<PathBuf, DynError> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
+    let home = home.trim();
+    if home.is_empty() {
+        return Err("HOME is empty".into());
+    }
+    Ok(PathBuf::from(home).join(".local/run/leash.sock"))
+}
+
+fn send_shutdown_auth_request(socket_path: &Path, hash: &str) -> Result<(), DynError> {
+    let mut stream = StdUnixStream::connect(socket_path)?;
+    stream.write_all(format!("{hash}\n").as_bytes())?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    if response.trim_end_matches(['\r', '\n']) == "OK" {
+        return Ok(());
+    }
+    Err("stop authentication rejected".into())
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: geteuid is thread-safe and has no preconditions.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(unix)]
+fn ensure_socket_owner(path: &Path) -> Result<(), DynError> {
+    let metadata = fs::metadata(path)?;
+    if metadata.uid() != current_uid() {
+        return Err(format!(
+            "Shutdown socket {} is not owned by current user",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_socket_not_symlink(path: &Path) -> Result<(), DynError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!("Shutdown socket path is a symlink: {}", path.display()).into());
+        }
+    }
     Ok(())
 }
 
@@ -286,20 +374,18 @@ pub fn stop_agent(config_path: Option<&Path>, json_output: bool) -> Result<(), D
             )
         })?;
 
+    let mut stop_hash = String::new();
     if !cfg.auth.stop_password_hash.trim().is_empty() {
         let mut password = String::new();
         std::io::stdin().read_line(&mut password)?;
         let trimmed = password.trim_end_matches(['\r', '\n']);
-        let computed_hash = blake3::hash(trimmed.as_bytes()).to_hex().to_string();
-        if computed_hash != cfg.auth.stop_password_hash.trim() {
-            eprintln!("Stop password mismatch");
-            return Err("invalid stop password".into());
-        }
-        signal::kill(Pid::from_raw(pid), Signal::SIGUSR1)?;
-        std::thread::sleep(Duration::from_millis(25));
+        stop_hash = blake3::hash(trimmed.as_bytes()).to_hex().to_string();
     }
 
-    signal::kill(Pid::from_raw(pid), Signal::SIGTERM)?;
+    let socket_path = shutdown_socket_path()?;
+    assert_socket_not_symlink(&socket_path)?;
+    ensure_socket_owner(&socket_path)?;
+    send_shutdown_auth_request(&socket_path, &stop_hash)?;
     cleanup_pid_file();
 
     if json_output {
@@ -310,7 +396,7 @@ pub fn stop_agent(config_path: Option<&Path>, json_output: bool) -> Result<(), D
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        println!("Sent SIGTERM to Leash (PID {pid})");
+        println!("Sent authenticated shutdown request to Leash (PID {pid})");
     }
 
     Ok(())
@@ -516,11 +602,6 @@ fn read_pid_from_file(path: &Path) -> Result<Option<PidRecord>, DynError> {
     }
 
     Ok(Some(record))
-}
-
-fn current_uid() -> u32 {
-    // SAFETY: geteuid is thread-safe and has no preconditions.
-    unsafe { libc::geteuid() }
 }
 
 fn parse_pid_record(raw: &str) -> Option<PidRecord> {

@@ -1,16 +1,20 @@
 #!/bin/bash
 # Leash installer
-# Usage: curl -sSL https://leash.meridianhouse.tech/install.sh | bash
+# WARNING: Do not execute remote scripts directly (avoid curl|bash).
+# Download this script, verify checksum, inspect it, then run it locally.
 set -e
 
 echo "🐕 Installing Leash..."
 echo ""
 
+PINNED_REF="055f4517c120b6d9039e597c7a2c907e8ed92dee"
+PINNED_ARCHIVE_SHA256="b94445cbf6ce8864b6bf3869222f95ef6f432f6fbba4466f51a17b166250726f"
+SOURCE_URL="https://codeload.github.com/meridianhouse/leash/tar.gz/${PINNED_REF}"
+
 # Check for Rust
 if ! command -v cargo &> /dev/null; then
-    echo "Rust not found. Installing via rustup..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
+    echo "Rust (cargo) is required. Install Rust from https://rustup.rs and re-run this installer."
+    exit 1
 fi
 
 # Check for Linux
@@ -19,11 +23,34 @@ if [[ "$(uname)" != "Linux" ]]; then
     exit 1
 fi
 
-# Clone and build
+# Download pinned source tarball and verify checksum
 TMPDIR=$(mktemp -d)
+ARCHIVE="$TMPDIR/leash.tar.gz"
+echo "Downloading pinned source ($PINNED_REF)..."
+curl -fsSL "$SOURCE_URL" -o "$ARCHIVE"
+
+if command -v sha256sum &> /dev/null; then
+    ACTUAL_SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+elif command -v shasum &> /dev/null; then
+    ACTUAL_SHA256=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+else
+    echo "A SHA-256 tool is required (sha256sum or shasum)."
+    exit 1
+fi
+
+if [[ "$ACTUAL_SHA256" != "$PINNED_ARCHIVE_SHA256" ]]; then
+    echo "Checksum verification failed."
+    echo "Expected: $PINNED_ARCHIVE_SHA256"
+    echo "Actual:   $ACTUAL_SHA256"
+    exit 1
+fi
+
+echo "Checksum verified."
+mkdir -p "$TMPDIR/src"
+tar -xzf "$ARCHIVE" -C "$TMPDIR/src" --strip-components=1
+cd "$TMPDIR/src"
+
 echo "Building from source..."
-git clone --depth 1 https://github.com/meridianhouse/leash.git "$TMPDIR/leash"
-cd "$TMPDIR/leash"
 cargo build --release
 
 # Install binary
