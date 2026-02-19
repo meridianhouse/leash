@@ -11,16 +11,17 @@ use crate::stats;
 use crate::test_events::build_test_events;
 use crate::watchdog::Watchdog;
 use nix::sys::signal::{self, Signal};
+use nix::libc;
 use nix::unistd::Pid;
 use nu_ansi_term::Color;
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval, sleep};
 use tracing::{debug, error, info, warn};
-
-const PID_FILE: &str = "/tmp/leash.pid";
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -127,22 +128,15 @@ pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynEr
 }
 
 pub fn print_status(json_output: bool) -> Result<(), DynError> {
-    let running = if let Ok(pid_str) = fs::read_to_string(PID_FILE) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            Path::new(&format!("/proc/{pid}")).exists()
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let pid_file = pid_file_path()?;
+    let running = matches!(read_pid_from_file(&pid_file), Ok(Some(_)));
 
     if json_output {
         let stats = stats::load_snapshot().ok().flatten();
         let value = serde_json::json!({
             "name": "Leash",
             "running": running,
-            "pid_file": PID_FILE,
+            "pid_file": pid_file,
             "stats": stats,
             "timestamp": chrono::Utc::now(),
         });
@@ -179,8 +173,9 @@ pub fn print_status(json_output: bool) -> Result<(), DynError> {
 }
 
 pub fn stop_agent(json_output: bool) -> Result<(), DynError> {
-    let pid_str = fs::read_to_string(PID_FILE)?;
-    let pid = pid_str.trim().parse::<i32>()?;
+    let pid_file = pid_file_path()?;
+    let pid = read_pid_from_file(&pid_file)?
+        .ok_or_else(|| format!("Leash is not running (missing or stale PID file at {})", pid_file.display()))?;
     signal::kill(Pid::from_raw(pid), Signal::SIGTERM)?;
     cleanup_pid_file();
 
@@ -278,24 +273,104 @@ fn print_startup_banner() {
 }
 
 fn ensure_single_instance() -> Result<(), DynError> {
-    if let Ok(pid_str) = fs::read_to_string(PID_FILE)
-        && let Ok(pid) = pid_str.trim().parse::<i32>()
-    {
-        let proc_path = PathBuf::from(format!("/proc/{pid}"));
-        if proc_path.exists() {
-            return Err(format!("Leash already running with PID {pid}").into());
-        }
+    let pid_file = pid_file_path()?;
+    if let Some(pid) = read_pid_from_file(&pid_file)? {
+        return Err(format!("Leash already running with PID {pid}").into());
     }
+
+    // Clear stale PID files once ownership checks pass.
+    if pid_file.exists() {
+        fs::remove_file(pid_file)?;
+    }
+
     Ok(())
 }
 
 fn write_pid_file() -> Result<(), DynError> {
-    fs::write(PID_FILE, format!("{}\n", std::process::id()))?;
+    let pid_file = pid_file_path()?;
+    if let Some(parent) = pid_file.parent() {
+        create_runtime_dir(parent)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&pid_file)?;
+    file.write_all(format!("{}\n", std::process::id()).as_bytes())?;
+    file.sync_all()?;
     Ok(())
 }
 
 fn cleanup_pid_file() {
-    if let Err(err) = fs::remove_file(PID_FILE) {
+    let Ok(pid_file) = pid_file_path() else {
+        return;
+    };
+
+    if let Err(err) = fs::remove_file(pid_file) {
         debug!(?err, "failed to remove pid file");
     }
+}
+
+fn pid_file_path() -> Result<PathBuf, DynError> {
+    let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
+    let home = home.trim();
+    if home.is_empty() {
+        return Err("HOME is empty".into());
+    }
+
+    Ok(PathBuf::from(home).join(".local/run/leash.pid"))
+}
+
+fn create_runtime_dir(path: &Path) -> Result<(), DynError> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)?;
+    Ok(())
+}
+
+fn read_pid_from_file(path: &Path) -> Result<Option<i32>, DynError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("PID file is not a regular file: {}", path.display()).into());
+    }
+
+    let current_uid = current_uid();
+    if metadata.uid() != current_uid {
+        return Err(format!(
+            "PID file {} is not owned by current user",
+            path.display()
+        )
+        .into());
+    }
+
+    let pid_raw = fs::read_to_string(path)?;
+    let Ok(pid) = pid_raw.trim().parse::<i32>() else {
+        return Ok(None);
+    };
+    if pid <= 0 {
+        return Ok(None);
+    }
+
+    let proc_path = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_path.exists() {
+        return Ok(None);
+    }
+
+    let proc_meta = fs::metadata(proc_path)?;
+    if proc_meta.uid() != current_uid {
+        return Err(format!("PID {pid} is not owned by current user").into());
+    }
+
+    Ok(Some(pid))
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid is thread-safe and has no preconditions.
+    unsafe { libc::geteuid() }
 }
