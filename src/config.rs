@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
+use nix::libc;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use std::ffi::CStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -380,20 +382,78 @@ fn default_suspicious_country_ip_prefixes() -> Vec<String> {
 }
 
 fn default_config_path() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config/leash/config.yaml")
-    } else {
-        PathBuf::from("/etc/leash/config.yaml")
-    }
+    trusted_home_dir()
+        .map(|home| home.join(".config/leash/config.yaml"))
+        .unwrap_or_else(|| PathBuf::from("/etc/leash/config.yaml"))
 }
 
 pub fn expand_tilde(input: &str) -> String {
     if let Some(rest) = input.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
+        && let Some(home) = trusted_home_dir()
     {
-        return format!("{home}/{rest}");
+        return home.join(rest).display().to_string();
     }
     input.to_string()
+}
+
+fn trusted_home_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(trimmed);
+            if is_valid_home_path(&path) {
+                return Some(path);
+            }
+        }
+    }
+
+    lookup_home_from_passwd().filter(|path| is_valid_home_path(path))
+}
+
+fn is_valid_home_path(path: &Path) -> bool {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return false;
+    }
+    let forbidden = [
+        Path::new("/"),
+        Path::new("/etc"),
+        Path::new("/bin"),
+        Path::new("/sbin"),
+        Path::new("/usr"),
+        Path::new("/var"),
+        Path::new("/tmp"),
+        Path::new("/proc"),
+        Path::new("/dev"),
+        Path::new("/sys"),
+        Path::new("/run"),
+    ];
+    if forbidden.contains(&path) {
+        return false;
+    }
+
+    path.starts_with("/home/") || path.starts_with("/Users/") || path == Path::new("/root")
+}
+
+fn lookup_home_from_passwd() -> Option<PathBuf> {
+    // SAFETY: libc calls are used with valid pointers and owned buffers.
+    unsafe {
+        let uid = libc::geteuid();
+        let mut passwd: libc::passwd = std::mem::zeroed();
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let mut buffer = vec![0u8; 16 * 1024];
+        let rc = libc::getpwuid_r(
+            uid,
+            &mut passwd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        );
+        if rc != 0 || result.is_null() || passwd.pw_dir.is_null() {
+            return None;
+        }
+        let home = CStr::from_ptr(passwd.pw_dir).to_string_lossy().into_owned();
+        Some(PathBuf::from(home))
+    }
 }
 
 fn validate_level(raw: &str, field_name: &str) -> Result<()> {
@@ -442,7 +502,10 @@ fn is_numeric_chat_id(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, is_numeric_chat_id, is_valid_https_url, is_valid_telegram_token};
+    use super::{
+        Config, is_numeric_chat_id, is_valid_home_path, is_valid_https_url, is_valid_telegram_token,
+    };
+    use std::path::Path;
 
     #[test]
     fn default_config_yaml_parses() {
@@ -526,5 +589,13 @@ egress:
         assert!(is_numeric_chat_id("123456"));
         assert!(is_numeric_chat_id("-100123456"));
         assert!(!is_numeric_chat_id("chat123"));
+    }
+
+    #[test]
+    fn home_validation_rejects_system_paths() {
+        assert!(!is_valid_home_path(Path::new("")));
+        assert!(!is_valid_home_path(Path::new("/etc")));
+        assert!(!is_valid_home_path(Path::new("/tmp")));
+        assert!(is_valid_home_path(Path::new("/home/ryan")));
     }
 }
