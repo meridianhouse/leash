@@ -6,10 +6,6 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     #[serde(default = "default_monitor_interval_ms")]
     pub monitor_interval_ms: u64,
-    #[serde(default = "default_alert_log_path")]
-    pub alert_log_path: String,
-    #[serde(default)]
-    pub webhook_urls: Vec<String>,
     #[serde(default = "default_ai_agents")]
     pub ai_agents: Vec<String>,
     #[serde(default = "default_legit_ai_parents")]
@@ -40,6 +36,48 @@ pub struct ResponseConfig {
 pub struct AlertConfig {
     #[serde(default = "default_alert_min_level")]
     pub min_level: String,
+    #[serde(default)]
+    pub slack: SlackAlertConfig,
+    #[serde(default)]
+    pub discord: DiscordAlertConfig,
+    #[serde(default)]
+    pub telegram: TelegramAlertConfig,
+    #[serde(default)]
+    pub json_log: JsonLogConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackAlertConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub webhook_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordAlertConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub webhook_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramAlertConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub chat_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonLogConfig {
+    #[serde(default = "default_json_log_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_alert_log_path")]
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,8 +90,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             monitor_interval_ms: default_monitor_interval_ms(),
-            alert_log_path: default_alert_log_path(),
-            webhook_urls: Vec::new(),
             ai_agents: default_ai_agents(),
             legitimate_ai_parents: default_legit_ai_parents(),
             sensitive_path_keywords: default_sensitive_keywords(),
@@ -86,6 +122,47 @@ impl Default for AlertConfig {
     fn default() -> Self {
         Self {
             min_level: default_alert_min_level(),
+            slack: SlackAlertConfig::default(),
+            discord: DiscordAlertConfig::default(),
+            telegram: TelegramAlertConfig::default(),
+            json_log: JsonLogConfig::default(),
+        }
+    }
+}
+
+impl Default for SlackAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+        }
+    }
+}
+
+impl Default for DiscordAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+        }
+    }
+}
+
+impl Default for TelegramAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: String::new(),
+            chat_id: String::new(),
+        }
+    }
+}
+
+impl Default for JsonLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_json_log_enabled(),
+            path: default_alert_log_path(),
         }
     }
 }
@@ -111,7 +188,7 @@ impl Config {
         let raw = fs::read_to_string(&config_path)?;
         let mut cfg: Self = serde_yaml::from_str(&raw)?;
 
-        cfg.alert_log_path = expand_tilde(&cfg.alert_log_path);
+        cfg.alerts.json_log.path = expand_tilde(&cfg.alerts.json_log.path);
         cfg.fim_paths = cfg
             .fim_paths
             .into_iter()
@@ -128,6 +205,10 @@ fn default_monitor_interval_ms() -> u64 {
 
 fn default_alert_log_path() -> String {
     "~/.local/state/leash/alerts.jsonl".into()
+}
+
+fn default_json_log_enabled() -> bool {
+    true
 }
 
 fn default_response_level() -> String {

@@ -1,13 +1,6 @@
 # Leash default configuration
 monitor_interval_ms: 1000
 
-# Local append-only JSONL alert log
-alert_log_path: ~/.local/state/leash/alerts.jsonl
-
-# Optional outgoing webhooks. Slack-style webhook payload uses {"text": "..."}
-# Discord webhook payload uses {"content": "..."}
-webhook_urls: []
-
 # AI tool process identifiers to watch
 ai_agents:
   - claude
@@ -65,6 +58,19 @@ response:
 
 alerts:
   min_level: yellow
+  slack:
+    enabled: false
+    webhook_url: ""
+  discord:
+    enabled: false
+    webhook_url: ""
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+  json_log:
+    enabled: true
+    path: ~/.local/state/leash/alerts.jsonl
 
 egress:
   suspicious_ports:
