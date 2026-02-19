@@ -65,7 +65,7 @@ alerts:
   # known_good_commands: REMOVED - use baseline_learning instead
 
   deduplication_enabled: false
-  deduplication_hours: 0  # Disabled
+  deduplication_window_seconds: 300
   # BASELINE LEARNING - learns what's normal for each user/agent
   baseline_learning_hours: 24
   baseline_threshold: 3  # Commands seen < 3 times are outliers

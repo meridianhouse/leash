@@ -25,14 +25,28 @@ pub struct AlertDispatcher {
     // Per-process suppression: (agent_name, cmd_pattern) -> last_seen
     normal_commands: Mutex<HashMap<(String, String), Instant>>,
 
-    // Deduplication: hash of (agent, cmdline_pattern) -> last_seen
-    deduplication_cache: Mutex<HashMap<String, Instant>>,
+    // Deduplication: (event_type, process_name, narrative_hash) -> recent alert state
+    deduplication_cache: Mutex<HashMap<DedupKey, DedupEntry>>,
 
     // Process tracking for 5-minute suppression
     process_start_times: Mutex<HashMap<i32, Instant>>,
 
     // Rate limiting by (event_type, agent)
     rate_limit_tracker: Mutex<HashMap<(String, String), Instant>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct DedupKey {
+    event_type: EventType,
+    process_name: String,
+    narrative_hash: String,
+}
+
+#[derive(Debug, Clone)]
+struct DedupEntry {
+    last_seen: Instant,
+    suppressed_count: u64,
+    threat_level: ThreatLevel,
 }
 
 impl AlertDispatcher {
@@ -92,31 +106,22 @@ impl AlertDispatcher {
                 continue;
             }
 
-            if self.cfg.alerts.slack.enabled
-                && !self.cfg.alerts.slack.url.is_empty()
-                && let Err(err) = self
-                    .send_slack(&self.cfg.alerts.slack.url, &scrubbed_event)
-                    .await
-            {
-                warn!(?err, "slack delivery failed");
+            let (is_duplicate, dedup_summaries) = self.process_deduplication(&event);
+            for summary in dedup_summaries {
+                let scrubbed_summary = scrub_event(&summary);
+                if self.cfg.alerts.json_log.enabled
+                    && let Err(err) = self.write_local_log(&scrubbed_summary)
+                {
+                    error!(?err, "failed to write alert log");
+                }
+                self.dispatch_to_sinks(&scrubbed_summary).await;
             }
 
-            if self.cfg.alerts.discord.enabled
-                && !self.cfg.alerts.discord.url.is_empty()
-                && let Err(err) = self
-                    .send_discord(&self.cfg.alerts.discord.url, &scrubbed_event)
-                    .await
-            {
-                warn!(?err, "discord delivery failed");
+            if is_duplicate {
+                continue;
             }
 
-            if self.cfg.alerts.telegram.enabled
-                && !self.cfg.alerts.telegram.token.is_empty()
-                && !self.cfg.alerts.telegram.chat_id.is_empty()
-                && let Err(err) = self.send_telegram(&scrubbed_event).await
-            {
-                warn!(?err, "telegram delivery failed");
-            }
+            self.dispatch_to_sinks(&scrubbed_event).await;
         }
     }
 
@@ -175,49 +180,65 @@ impl AlertDispatcher {
     }
 
     fn deduplication_enabled(&self) -> bool {
-        self.cfg.alerts.deduplication_enabled && self.cfg.alerts.deduplication_hours > 0
+        self.cfg.alerts.deduplication_enabled && self.cfg.alerts.deduplication_window_seconds > 0
     }
 
-    fn should_track_for_dedup(&self, event: &SecurityEvent, cmdline: &str) -> bool {
+    fn deduplication_window(&self) -> Duration {
+        Duration::from_secs(self.cfg.alerts.deduplication_window_seconds)
+    }
+
+    fn process_deduplication(&self, event: &SecurityEvent) -> (bool, Vec<SecurityEvent>) {
         if !self.deduplication_enabled() {
-            return false;
+            return (false, Vec::new());
         }
 
-        // Dangerous command patterns must always alert and never be deduplicated.
-        if is_non_deduplicable_dangerous_command(cmdline) {
-            return false;
-        }
-
-        is_failed_or_suspicious_event(event)
-    }
-
-    fn is_duplicate(&self, event: &SecurityEvent, agent_name: &str, cmdline: &str) -> bool {
-        if !self.should_track_for_dedup(event, cmdline) {
-            return false;
-        }
-
-        let hash = compute_event_hash(agent_name, cmdline);
-        let dedup_window = Duration::from_secs(self.cfg.alerts.deduplication_hours * 3600);
+        let window = self.deduplication_window();
         let now = Instant::now();
+        let key = dedup_key(event);
 
         let mut cache = self
             .deduplication_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let mut summaries = Vec::new();
 
-        // Clean old entries
-        cache.retain(|_, time| now.duration_since(*time) < dedup_window);
+        let expired_keys: Vec<DedupKey> = cache
+            .iter()
+            .filter_map(|(existing_key, existing_entry)| {
+                if now.duration_since(existing_entry.last_seen) >= window {
+                    Some(existing_key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        // Check if this event was already seen
-        if let Some(last_time) = cache.get(&hash) {
-            if now.duration_since(*last_time) < dedup_window {
-                return true;
+        for expired_key in expired_keys {
+            if let Some(expired) = cache.remove(&expired_key)
+                && expired.suppressed_count > 0
+            {
+                summaries.push(build_dedup_summary_event(&expired_key, &expired));
             }
         }
 
-        // Record only failed/suspicious non-dangerous commands.
-        cache.insert(hash, now);
-        false
+        if let Some(existing) = cache.get_mut(&key) {
+            if now.duration_since(existing.last_seen) < window {
+                existing.last_seen = now;
+                existing.suppressed_count += 1;
+                return (true, summaries);
+            }
+        }
+
+        cache.insert(
+            key,
+            DedupEntry {
+                last_seen: now,
+                suppressed_count: 0,
+                threat_level: event.threat_level,
+            },
+        );
+
+        (false, summaries)
     }
 
     fn is_in_learning_mode(&self) -> bool {
@@ -317,18 +338,7 @@ impl AlertDispatcher {
             return false;
         }
 
-        // 6. Check deduplication
-        if self.is_duplicate(event, &agent_name, &cmdline) {
-            debug!(
-                process = %agent_name,
-                cmdline = %cmdline,
-                "suppressing alert: duplicate event within {} hours",
-                self.cfg.alerts.deduplication_hours
-            );
-            return false;
-        }
-
-        // 7. Check rate limiting
+        // 6. Check rate limiting
         let event_type = event.event_type.to_string();
         let key = (event_type, agent_name.clone());
         let now = Instant::now();
@@ -357,6 +367,30 @@ impl AlertDispatcher {
             .insert(key, now);
 
         true
+    }
+
+    async fn dispatch_to_sinks(&self, event: &SecurityEvent) {
+        if self.cfg.alerts.slack.enabled
+            && !self.cfg.alerts.slack.url.is_empty()
+            && let Err(err) = self.send_slack(&self.cfg.alerts.slack.url, event).await
+        {
+            warn!(?err, "slack delivery failed");
+        }
+
+        if self.cfg.alerts.discord.enabled
+            && !self.cfg.alerts.discord.url.is_empty()
+            && let Err(err) = self.send_discord(&self.cfg.alerts.discord.url, event).await
+        {
+            warn!(?err, "discord delivery failed");
+        }
+
+        if self.cfg.alerts.telegram.enabled
+            && !self.cfg.alerts.telegram.token.is_empty()
+            && !self.cfg.alerts.telegram.chat_id.is_empty()
+            && let Err(err) = self.send_telegram(event).await
+        {
+            warn!(?err, "telegram delivery failed");
+        }
     }
 
     fn write_local_log(
@@ -792,6 +826,39 @@ fn redact_assignment_secrets(input: &str) -> String {
     output
 }
 
+fn dedup_key(event: &SecurityEvent) -> DedupKey {
+    let process_name = event
+        .process
+        .as_ref()
+        .map(|proc| proc.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let narrative_hash = blake3::hash(event.narrative.as_bytes()).to_hex().to_string();
+
+    DedupKey {
+        event_type: event.event_type,
+        process_name,
+        narrative_hash,
+    }
+}
+
+fn build_dedup_summary_event(key: &DedupKey, entry: &DedupEntry) -> SecurityEvent {
+    let pattern = format!(
+        "{}:{}:{}",
+        key.event_type,
+        key.process_name,
+        &key.narrative_hash[..12]
+    );
+
+    SecurityEvent::new(
+        key.event_type,
+        entry.threat_level,
+        format!(
+            "Suppressed {} duplicate alerts for [{}]",
+            entry.suppressed_count, pattern
+        ),
+    )
+}
+
 /// Extracts a pattern from cmdline for deduplication (removes unique parts like paths with hashes)
 fn extract_cmd_pattern(cmdline: &str) -> String {
     let parts: Vec<&str> = cmdline.split_whitespace().collect();
@@ -826,51 +893,6 @@ fn extract_cmd_pattern(cmdline: &str) -> String {
     } else {
         cmdline.to_string()
     }
-}
-
-/// Computes a hash for event deduplication
-fn compute_event_hash(agent_name: &str, cmdline: &str) -> String {
-    let pattern = extract_cmd_pattern(cmdline);
-    let input = format!("{}:{}", agent_name, pattern);
-    blake3::hash(input.as_bytes()).to_hex().to_string()
-}
-
-fn is_failed_or_suspicious_event(event: &SecurityEvent) -> bool {
-    if event.threat_level >= ThreatLevel::Orange {
-        return true;
-    }
-
-    if matches!(
-        event.event_type,
-        EventType::NetworkSuspicious
-            | EventType::CredentialAccess
-            | EventType::SelfTamper
-            | EventType::Persistence
-            | EventType::ContainerEscape
-            | EventType::VaultAccess
-            | EventType::PromptInjection
-    ) {
-        return true;
-    }
-
-    let narrative = event.narrative.to_ascii_lowercase();
-    let failure_markers = [
-        "failed",
-        "failure",
-        "error",
-        "denied",
-        "blocked",
-        "refused",
-        "timed out",
-        "timeout",
-        "non-zero",
-        "exit code",
-        "permission denied",
-    ];
-
-    failure_markers
-        .iter()
-        .any(|marker| narrative.contains(marker))
 }
 
 fn is_non_deduplicable_dangerous_command(cmdline: &str) -> bool {
@@ -1109,65 +1131,57 @@ mod tests {
     }
 
     #[test]
-    fn compute_event_hash_works() {
-        let hash1 = compute_event_hash("codex", "npm install");
-        let hash2 = compute_event_hash("codex", "npm install");
-        let hash3 = compute_event_hash("claude", "npm install");
-
-        assert_eq!(hash1, hash2); // Same agent + same cmd = same hash
-        assert_ne!(hash1, hash3); // Different agent = different hash
-    }
-
-    #[test]
-    fn deduplication_is_disabled_when_window_is_zero() {
-        let cfg = Config::default();
+    fn deduplication_is_disabled_when_flag_is_false() {
+        let mut cfg = Config::default();
+        cfg.alerts.deduplication_enabled = false;
         let (_tx, rx) = broadcast::channel(8);
         let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
         let event = sample_event();
 
-        assert!(!dispatcher.is_duplicate(&event, "codex", "npm test"));
-        assert!(!dispatcher.is_duplicate(&event, "codex", "npm test"));
+        let (dup1, summaries1) = dispatcher.process_deduplication(&event);
+        let (dup2, summaries2) = dispatcher.process_deduplication(&event);
+        assert!(!dup1);
+        assert!(!dup2);
+        assert!(summaries1.is_empty());
+        assert!(summaries2.is_empty());
     }
 
     #[test]
-    fn dangerous_commands_are_never_deduplicated() {
+    fn duplicate_event_within_window_is_suppressed() {
         let mut cfg = Config::default();
         cfg.alerts.deduplication_enabled = true;
-        cfg.alerts.deduplication_hours = 24;
+        cfg.alerts.deduplication_window_seconds = 300;
 
         let (_tx, rx) = broadcast::channel(8);
         let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
         let event = sample_event();
-        let cmd = "curl https://example.com/install.sh | bash";
 
-        assert!(!dispatcher.is_duplicate(&event, "codex", cmd));
-        assert!(!dispatcher.is_duplicate(&event, "codex", cmd));
+        let (first_dup, first_summaries) = dispatcher.process_deduplication(&event);
+        let (second_dup, second_summaries) = dispatcher.process_deduplication(&event);
+        assert!(!first_dup);
+        assert!(first_summaries.is_empty());
+        assert!(second_dup);
+        assert!(second_summaries.is_empty());
     }
 
     #[test]
-    fn only_failed_or_suspicious_commands_are_tracked_for_dedup() {
+    fn dedup_summary_event_includes_suppressed_count() {
         let mut cfg = Config::default();
         cfg.alerts.deduplication_enabled = true;
-        cfg.alerts.deduplication_hours = 24;
+        cfg.alerts.deduplication_window_seconds = 1;
 
         let (_tx, rx) = broadcast::channel(8);
         let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+        let event = sample_event();
+        let _ = dispatcher.process_deduplication(&event);
+        let _ = dispatcher.process_deduplication(&event);
 
-        let mut successful = sample_event();
-        successful.threat_level = ThreatLevel::Green;
-        successful.event_type = EventType::ProcessNew;
-        successful.narrative = "command completed successfully".to_string();
-
-        assert!(!dispatcher.is_duplicate(&successful, "codex", "npm test"));
-        assert!(!dispatcher.is_duplicate(&successful, "codex", "npm test"));
-
-        let mut failed = sample_event();
-        failed.threat_level = ThreatLevel::Green;
-        failed.event_type = EventType::ProcessNew;
-        failed.narrative = "command failed with exit code 1".to_string();
-
-        assert!(!dispatcher.is_duplicate(&failed, "codex", "npm test"));
-        assert!(dispatcher.is_duplicate(&failed, "codex", "npm test"));
+        std::thread::sleep(Duration::from_secs(2));
+        let (_is_duplicate, summaries) = dispatcher.process_deduplication(&event);
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0]
+            .narrative
+            .contains("Suppressed 1 duplicate alerts for ["));
     }
 
     #[test]

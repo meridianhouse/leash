@@ -65,7 +65,7 @@ alerts:
   rate_limit_seconds: 300
   learning_mode_hours: 24
   deduplication_enabled: false
-  deduplication_hours: 0
+  deduplication_window_seconds: 300
   slack:
     enabled: false
     webhook_url: ""
