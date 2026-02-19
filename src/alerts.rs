@@ -16,7 +16,7 @@ pub struct AlertDispatcher {
     client: Client,
     min_severity: ThreatLevel,
     rate_limit: Duration,
-    last_alert_by_type: HashMap<String, Instant>,
+    last_alert_by_source: HashMap<(String, i32), Instant>,
 }
 
 impl AlertDispatcher {
@@ -27,7 +27,7 @@ impl AlertDispatcher {
         Ok(Self {
             min_severity: parse_level(&cfg.alerts.min_severity),
             rate_limit: Duration::from_secs(cfg.alerts.rate_limit_seconds),
-            last_alert_by_type: HashMap::new(),
+            last_alert_by_source: HashMap::new(),
             cfg,
             rx,
             client: Client::builder().build()?,
@@ -93,14 +93,16 @@ impl AlertDispatcher {
     fn should_send_for_event_type(&mut self, event: &SecurityEvent) -> bool {
         let now = Instant::now();
         let event_type = event.event_type.to_string();
+        let pid = event.process.as_ref().map(|proc| proc.pid).unwrap_or(-1);
+        let key = (event_type, pid);
 
-        if let Some(last) = self.last_alert_by_type.get(&event_type)
+        if let Some(last) = self.last_alert_by_source.get(&key)
             && now.duration_since(*last) < self.rate_limit
         {
             return false;
         }
 
-        self.last_alert_by_type.insert(event_type, now);
+        self.last_alert_by_source.insert(key, now);
         true
     }
 
@@ -614,15 +616,30 @@ mod tests {
     fn rate_limiter_allows_events_after_window_expires() {
         let mut dispatcher = dispatcher();
         let event = sample_event();
-        let key = event.event_type.to_string();
+        let key = (
+            event.event_type.to_string(),
+            event.process.as_ref().map(|p| p.pid).unwrap_or(-1),
+        );
 
         assert!(dispatcher.should_send_for_event_type(&event));
-        dispatcher.last_alert_by_type.insert(
+        dispatcher.last_alert_by_source.insert(
             key,
             Instant::now() - dispatcher.rate_limit - Duration::from_millis(1),
         );
 
         assert!(dispatcher.should_send_for_event_type(&event));
+    }
+
+    #[test]
+    fn rate_limiter_isolated_by_pid() {
+        let mut dispatcher = dispatcher();
+        let event_a = sample_event();
+        let mut event_b = sample_event();
+        event_b.process.as_mut().expect("process must exist").pid = 9001;
+
+        assert!(dispatcher.should_send_for_event_type(&event_a));
+        assert!(!dispatcher.should_send_for_event_type(&event_a));
+        assert!(dispatcher.should_send_for_event_type(&event_b));
     }
 
     #[test]
