@@ -137,9 +137,15 @@ mod tests {
         let mut state = StatsState::default();
         let now = chrono::Utc::now();
 
-        state.events_last_minute.push_back(now - chrono::Duration::seconds(61));
-        state.events_last_minute.push_back(now - chrono::Duration::seconds(40));
-        state.events_last_minute.push_back(now - chrono::Duration::seconds(5));
+        state
+            .events_last_minute
+            .push_back(now - chrono::Duration::seconds(61));
+        state
+            .events_last_minute
+            .push_back(now - chrono::Duration::seconds(40));
+        state
+            .events_last_minute
+            .push_back(now - chrono::Duration::seconds(5));
 
         let snapshot = state.snapshot();
         assert_eq!(snapshot.events_per_minute, 2.0);
