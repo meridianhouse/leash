@@ -1,15 +1,30 @@
 use crate::models::{SecurityEvent, ThreatLevel};
 use rusqlite::{Connection, params};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tracing::warn;
 
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct HistoryRecord {
     timestamp: chrono::DateTime<chrono::Utc>,
     severity: String,
     event_type: String,
     narrative: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ExportFormat {
+    Json,
+    Csv,
+}
+
+#[derive(Debug)]
+struct StoredEvent {
+    timestamp: String,
+    severity: String,
+    event_type: String,
+    narrative: String,
+    payload_json: String,
 }
 
 pub async fn record_events(mut rx: broadcast::Receiver<SecurityEvent>) -> anyhow::Result<()> {
@@ -34,45 +49,7 @@ pub fn print_history(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let conn = open_db()?;
-    let mut query =
-        String::from("SELECT timestamp, severity, event_type, narrative FROM events WHERE 1=1");
-    let mut args: Vec<String> = Vec::new();
-
-    if let Some(duration) = parse_last_filter(last)? {
-        let threshold = chrono::Utc::now() - duration;
-        query.push_str(" AND timestamp >= ?");
-        args.push(threshold.to_rfc3339());
-    }
-
-    if let Some(sev) = parse_severity_filter(severity)? {
-        query.push_str(" AND severity = ?");
-        args.push(sev);
-    }
-
-    query.push_str(" ORDER BY timestamp DESC LIMIT 200");
-
-    let mut stmt = conn.prepare(&query)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
-        Ok(HistoryRecord {
-            timestamp: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
-                .map_err(|err| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(err),
-                    )
-                })?
-                .with_timezone(&chrono::Utc),
-            severity: row.get(1)?,
-            event_type: row.get(2)?,
-            narrative: row.get(3)?,
-        })
-    })?;
-
-    let mut records = Vec::new();
-    for item in rows {
-        records.push(item?);
-    }
+    let records = query_records(&conn, last, severity, Some(200))?;
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&records)?);
@@ -96,8 +73,63 @@ pub fn print_history(
     Ok(())
 }
 
+pub fn export_events(
+    format: ExportFormat,
+    last: Option<&str>,
+    severity: Option<&str>,
+) -> anyhow::Result<()> {
+    let conn = open_db()?;
+    let events = query_security_events(&conn, last, severity, None)?;
+
+    match format {
+        ExportFormat::Json => {
+            for event in events {
+                println!("{}", serde_json::to_string(&event)?);
+            }
+        }
+        ExportFormat::Csv => {
+            println!("timestamp,event_type,threat_level,narrative,pid,process_name");
+            for event in events {
+                let pid = event
+                    .process
+                    .as_ref()
+                    .map(|process| process.pid.to_string())
+                    .unwrap_or_default();
+                let process_name = event
+                    .process
+                    .as_ref()
+                    .map(|process| process.name.clone())
+                    .unwrap_or_default();
+                println!(
+                    "{},{},{},{},{},{}",
+                    csv_cell(&event.timestamp.to_rfc3339()),
+                    csv_cell(&event.event_type.to_string()),
+                    csv_cell(threat_level_as_str(event.threat_level)),
+                    csv_cell(&event.narrative),
+                    csv_cell(&pid),
+                    csv_cell(&process_name),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 pub fn open_db() -> anyhow::Result<Connection> {
     let path = db_path()?;
+    open_db_at(&path)
+}
+
+fn open_db_at(path: &Path) -> anyhow::Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -126,6 +158,10 @@ pub fn db_path() -> anyhow::Result<PathBuf> {
 
 pub fn store_event(event: &SecurityEvent) -> anyhow::Result<()> {
     let conn = open_db()?;
+    insert_event(&conn, event)
+}
+
+fn insert_event(conn: &Connection, event: &SecurityEvent) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO events (timestamp, severity, event_type, narrative, payload_json)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -138,6 +174,90 @@ pub fn store_event(event: &SecurityEvent) -> anyhow::Result<()> {
         ],
     )?;
     Ok(())
+}
+
+fn query_records(
+    conn: &Connection,
+    last: Option<&str>,
+    severity: Option<&str>,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<HistoryRecord>> {
+    let rows = query_stored_events(conn, last, severity, limit)?;
+    let mut records = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&row.timestamp)?.with_timezone(&chrono::Utc);
+        records.push(HistoryRecord {
+            timestamp,
+            severity: row.severity,
+            event_type: row.event_type,
+            narrative: row.narrative,
+        });
+    }
+
+    Ok(records)
+}
+
+fn query_security_events(
+    conn: &Connection,
+    last: Option<&str>,
+    severity: Option<&str>,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<SecurityEvent>> {
+    let rows = query_stored_events(conn, last, severity, limit)?;
+    let mut events = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        events.push(serde_json::from_str::<SecurityEvent>(&row.payload_json)?);
+    }
+
+    Ok(events)
+}
+
+fn query_stored_events(
+    conn: &Connection,
+    last: Option<&str>,
+    severity: Option<&str>,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<StoredEvent>> {
+    let mut query = String::from(
+        "SELECT timestamp, severity, event_type, narrative, payload_json FROM events WHERE 1=1",
+    );
+    let mut args: Vec<String> = Vec::new();
+
+    if let Some(duration) = parse_last_filter(last)? {
+        let threshold = chrono::Utc::now() - duration;
+        query.push_str(" AND timestamp >= ?");
+        args.push(threshold.to_rfc3339());
+    }
+
+    if let Some(sev) = parse_severity_filter(severity)? {
+        query.push_str(" AND severity = ?");
+        args.push(sev);
+    }
+
+    query.push_str(" ORDER BY timestamp DESC");
+    if let Some(value) = limit {
+        query.push_str(&format!(" LIMIT {value}"));
+    }
+
+    let mut stmt = conn.prepare(&query)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
+        Ok(StoredEvent {
+            timestamp: row.get(0)?,
+            severity: row.get(1)?,
+            event_type: row.get(2)?,
+            narrative: row.get(3)?,
+            payload_json: row.get(4)?,
+        })
+    })?;
+
+    let mut records = Vec::new();
+    for item in rows {
+        records.push(item?);
+    }
+
+    Ok(records)
 }
 
 fn parse_last_filter(last: Option<&str>) -> anyhow::Result<Option<chrono::Duration>> {
@@ -173,5 +293,123 @@ fn threat_level_as_str(level: ThreatLevel) -> &'static str {
         ThreatLevel::Orange => "orange",
         ThreatLevel::Red => "red",
         ThreatLevel::Nuclear => "nuclear",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{EventType, SecurityEvent, ThreatLevel};
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("leash-history-{label}-{}-{nanos}.db", std::process::id()))
+    }
+
+    fn sample_event(
+        timestamp: chrono::DateTime<chrono::Utc>,
+        level: ThreatLevel,
+        narrative: &str,
+    ) -> SecurityEvent {
+        let mut event = SecurityEvent::new(EventType::ProcessNew, level, narrative.to_string());
+        event.timestamp = timestamp;
+        event
+    }
+
+    #[test]
+    fn sqlite_db_creation_creates_schema() {
+        let db_path = temp_db_path("create");
+        let conn = open_db_at(&db_path).expect("open db");
+
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='events'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table query");
+        assert_eq!(table_exists, 1);
+
+        let idx_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name='idx_events_timestamp'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("index query");
+        assert_eq!(idx_exists, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn event_insertion_persists_row() {
+        let db_path = temp_db_path("insert");
+        let conn = open_db_at(&db_path).expect("open db");
+
+        let event = sample_event(chrono::Utc::now(), ThreatLevel::Yellow, "insert me");
+        insert_event(&conn, &event).expect("insert event");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(1) FROM events", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn query_by_time_range_filters_older_events() {
+        let db_path = temp_db_path("time-range");
+        let conn = open_db_at(&db_path).expect("open db");
+
+        let old_event = sample_event(
+            chrono::Utc::now() - chrono::Duration::hours(30),
+            ThreatLevel::Green,
+            "old event",
+        );
+        let recent_event = sample_event(
+            chrono::Utc::now() - chrono::Duration::minutes(10),
+            ThreatLevel::Yellow,
+            "recent event",
+        );
+
+        insert_event(&conn, &old_event).expect("insert old");
+        insert_event(&conn, &recent_event).expect("insert recent");
+
+        let rows = query_records(&conn, Some("24h"), None, None).expect("query records");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].narrative, "recent event");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn query_by_severity_filters_results() {
+        let db_path = temp_db_path("severity");
+        let conn = open_db_at(&db_path).expect("open db");
+
+        let yellow_event = sample_event(chrono::Utc::now(), ThreatLevel::Yellow, "yellow event");
+        let red_event = sample_event(chrono::Utc::now(), ThreatLevel::Red, "red event");
+        insert_event(&conn, &yellow_event).expect("insert yellow");
+        insert_event(&conn, &red_event).expect("insert red");
+
+        let rows = query_records(&conn, None, Some("yellow"), None).expect("query severity");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].severity, "yellow");
+        assert_eq!(rows[0].narrative, "yellow event");
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn csv_cell_escapes_commas_quotes_and_newlines() {
+        assert_eq!(csv_cell("plain"), "plain");
+        assert_eq!(csv_cell("a,b"), "\"a,b\"");
+        assert_eq!(csv_cell("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_cell("a\nb"), "\"a\nb\"");
     }
 }

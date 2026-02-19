@@ -106,3 +106,42 @@ fn threat_level_as_str(level: ThreatLevel) -> &'static str {
         ThreatLevel::Nuclear => "nuclear",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{EventType, SecurityEvent, ThreatLevel};
+
+    fn sample_event(level: ThreatLevel, event_type: EventType) -> SecurityEvent {
+        SecurityEvent::new(event_type, level, "test event".to_string())
+    }
+
+    #[test]
+    fn event_counting_updates_totals_and_buckets() {
+        let mut state = StatsState::default();
+
+        state.record(&sample_event(ThreatLevel::Yellow, EventType::ProcessNew));
+        state.record(&sample_event(ThreatLevel::Red, EventType::CredentialAccess));
+        state.record(&sample_event(ThreatLevel::Yellow, EventType::ProcessNew));
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.total_events, 3);
+        assert_eq!(snapshot.events_by_severity.get("yellow"), Some(&2));
+        assert_eq!(snapshot.events_by_severity.get("red"), Some(&1));
+        assert_eq!(snapshot.events_by_type.get("process_new"), Some(&2));
+        assert_eq!(snapshot.events_by_type.get("credential_access"), Some(&1));
+    }
+
+    #[test]
+    fn events_per_minute_only_counts_recent_window() {
+        let mut state = StatsState::default();
+        let now = chrono::Utc::now();
+
+        state.events_last_minute.push_back(now - chrono::Duration::seconds(61));
+        state.events_last_minute.push_back(now - chrono::Duration::seconds(40));
+        state.events_last_minute.push_back(now - chrono::Duration::seconds(5));
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.events_per_minute, 2.0);
+    }
+}
