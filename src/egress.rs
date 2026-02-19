@@ -221,7 +221,7 @@ fn inode_to_process() -> HashMap<u64, (i32, String, String)> {
             .stat()
             .ok()
             .map(|s| s.comm)
-            .unwrap_or_else(|| String::new());
+            .unwrap_or_else(String::new);
         let cmdline = process
             .cmdline()
             .ok()

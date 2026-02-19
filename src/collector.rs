@@ -487,10 +487,10 @@ fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static s
         hits.push("eval_execution");
     }
 
-    if let Some(host) = extract_ssh_target_host(&lower) {
-        if is_unusual_ssh_host(&host) {
-            hits.push("ssh_unusual_host");
-        }
+    if let Some(host) = extract_ssh_target_host(&lower)
+        && is_unusual_ssh_host(&host)
+    {
+        hits.push("ssh_unusual_host");
     }
 
     if (lower.starts_with("nc ") || lower.contains(" nc ") || lower.starts_with("ncat "))

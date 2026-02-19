@@ -1,3 +1,5 @@
+#![deny(clippy::all)]
+
 mod alerts;
 mod cli;
 mod collector;
@@ -117,14 +119,14 @@ async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Result<(
     tokio::signal::ctrl_c().await?;
     info!("Shutdown requested.");
 
-    let _ = collector_handle.abort();
-    let _ = egress_handle.abort();
-    let _ = fim_handle.abort();
-    let _ = alerts_handle.abort();
-    let _ = response_handle.abort();
-    let _ = watchdog_handle.abort();
+    collector_handle.abort();
+    egress_handle.abort();
+    fim_handle.abort();
+    alerts_handle.abort();
+    response_handle.abort();
+    watchdog_handle.abort();
     if let Some(handle) = watch_handle {
-        let _ = handle.abort();
+        handle.abort();
     }
 
     cleanup_pid_file();
@@ -923,12 +925,12 @@ fn print_startup_banner() {
 }
 
 fn ensure_single_instance() -> Result<(), DynError> {
-    if let Ok(pid_str) = fs::read_to_string(PID_FILE) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            let proc_path = PathBuf::from(format!("/proc/{pid}"));
-            if proc_path.exists() {
-                return Err(format!("Leash already running with PID {pid}").into());
-            }
+    if let Ok(pid_str) = fs::read_to_string(PID_FILE)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+    {
+        let proc_path = PathBuf::from(format!("/proc/{pid}"));
+        if proc_path.exists() {
+            return Err(format!("Leash already running with PID {pid}").into());
         }
     }
     Ok(())

@@ -46,7 +46,7 @@ pub struct AlertsConfig {
     pub json_log: JsonLogConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SlackAlertConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -54,7 +54,7 @@ pub struct SlackAlertConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscordAlertConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -62,7 +62,7 @@ pub struct DiscordAlertConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TelegramAlertConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -132,34 +132,6 @@ impl Default for AlertsConfig {
             discord: DiscordAlertConfig::default(),
             telegram: TelegramAlertConfig::default(),
             json_log: JsonLogConfig::default(),
-        }
-    }
-}
-
-impl Default for SlackAlertConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            url: String::new(),
-        }
-    }
-}
-
-impl Default for DiscordAlertConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            url: String::new(),
-        }
-    }
-}
-
-impl Default for TelegramAlertConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            token: String::new(),
-            chat_id: String::new(),
         }
     }
 }
@@ -305,10 +277,10 @@ fn default_config_path() -> PathBuf {
 }
 
 pub fn expand_tilde(input: &str) -> String {
-    if let Some(rest) = input.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
+    if let Some(rest) = input.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
     }
     input.to_string()
 }

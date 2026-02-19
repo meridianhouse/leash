@@ -40,34 +40,34 @@ impl AlertDispatcher {
                 continue;
             }
 
-            if self.cfg.alerts.json_log.enabled {
-                if let Err(err) = self.write_local_log(&event) {
-                    error!(?err, "failed to write alert log");
-                }
+            if self.cfg.alerts.json_log.enabled
+                && let Err(err) = self.write_local_log(&event)
+            {
+                error!(?err, "failed to write alert log");
             }
 
-            if self.cfg.alerts.slack.enabled && !self.cfg.alerts.slack.url.is_empty() {
-                if let Err(err) = self.send_slack(&self.cfg.alerts.slack.url, &event).await {
-                    warn!(?err, "slack delivery failed");
-                }
+            if self.cfg.alerts.slack.enabled
+                && !self.cfg.alerts.slack.url.is_empty()
+                && let Err(err) = self.send_slack(&self.cfg.alerts.slack.url, &event).await
+            {
+                warn!(?err, "slack delivery failed");
             }
 
-            if self.cfg.alerts.discord.enabled && !self.cfg.alerts.discord.url.is_empty() {
-                if let Err(err) = self
+            if self.cfg.alerts.discord.enabled
+                && !self.cfg.alerts.discord.url.is_empty()
+                && let Err(err) = self
                     .send_discord(&self.cfg.alerts.discord.url, &event)
                     .await
-                {
-                    warn!(?err, "discord delivery failed");
-                }
+            {
+                warn!(?err, "discord delivery failed");
             }
 
             if self.cfg.alerts.telegram.enabled
                 && !self.cfg.alerts.telegram.token.is_empty()
                 && !self.cfg.alerts.telegram.chat_id.is_empty()
+                && let Err(err) = self.send_telegram(&event).await
             {
-                if let Err(err) = self.send_telegram(&event).await {
-                    warn!(?err, "telegram delivery failed");
-                }
+                warn!(?err, "telegram delivery failed");
             }
         }
     }
