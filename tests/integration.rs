@@ -1,7 +1,16 @@
+use leash::alerts::AlertDispatcher;
+use leash::config::Config;
+use leash::models::{EventType, ProcessInfo, SecurityEvent, ThreatLevel};
 use serde_json::Value;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +31,176 @@ fn run_leash(home: &Path, args: &[&str]) -> Output {
         .env("HOME", home)
         .output()
         .expect("run leash")
+}
+
+fn spawn_leash(home: &Path, args: &[&str]) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_leash"))
+        .args(args)
+        .env("HOME", home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn leash")
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let started = SystemTime::now();
+    loop {
+        if child.try_wait().expect("try_wait child").is_some() {
+            return true;
+        }
+        if started.elapsed().expect("elapsed since wait start") > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[derive(Clone)]
+struct MockResponse {
+    status: u16,
+    body: String,
+    delay: Duration,
+}
+
+struct MockWebhookServer {
+    addr: SocketAddr,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl MockWebhookServer {
+    fn start(response: MockResponse) -> Option<Self> {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(err) => panic!("bind mock webhook listener: {err}"),
+        };
+        listener
+            .set_nonblocking(true)
+            .expect("set listener nonblocking");
+        let addr = listener.local_addr().expect("get mock listener addr");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests_clone = Arc::clone(&requests);
+        let stop_clone = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if let Some(body) = read_http_body(&mut stream) {
+                            requests_clone.lock().expect("lock requests").push(body);
+                        }
+                        if response.delay > Duration::ZERO {
+                            thread::sleep(response.delay);
+                        }
+                        let status_text = match response.status {
+                            200 => "OK",
+                            404 => "Not Found",
+                            500 => "Internal Server Error",
+                            _ => "Status",
+                        };
+                        let payload = response.body.as_bytes();
+                        let reply = format!(
+                            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            response.status,
+                            status_text,
+                            payload.len()
+                        );
+                        let _ = stream.write_all(reply.as_bytes());
+                        let _ = stream.write_all(payload);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Some(Self {
+            addr,
+            requests,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.lock().expect("lock requests").len()
+    }
+}
+
+impl Drop for MockWebhookServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = TcpStream::connect(self.addr);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn read_http_body(stream: &mut TcpStream) -> Option<String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    let mut bytes = Vec::with_capacity(2048);
+    let mut buf = [0_u8; 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buf[..n]);
+                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(_) => return None,
+        }
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    let mut parts = text.split("\r\n\r\n");
+    let headers = parts.next().unwrap_or_default();
+    let body = parts.next().unwrap_or_default().to_string();
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let prefix = "content-length:";
+            let lower = line.to_ascii_lowercase();
+            lower
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(body.len());
+
+    if body.len() >= content_length {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+fn write_config(home: &Path, yaml: &str) -> std::path::PathBuf {
+    let path = home.join(".config/leash/config.yaml");
+    let parent = path.parent().expect("config parent");
+    fs::create_dir_all(parent).expect("create config parent");
+    fs::write(&path, yaml).expect("write config");
+    path
 }
 
 fn write_event_db(home: &Path, rows: &[(String, String, String, String, String)]) {
@@ -82,6 +261,23 @@ fn payload(
         "response_taken": null
     })
     .to_string()
+}
+
+fn alert_event(event_type: EventType, pid: i32, level: ThreatLevel) -> SecurityEvent {
+    let mut event = SecurityEvent::new(event_type, level, "integration alert test".to_string());
+    event.process = Some(ProcessInfo {
+        pid,
+        ppid: 1,
+        name: "agent".to_string(),
+        cmdline: "agent --run".to_string(),
+        exe: "/usr/bin/agent".to_string(),
+        cwd: "/tmp".to_string(),
+        username: "user".to_string(),
+        open_files: Vec::new(),
+        parent_chain: Vec::new(),
+        start_time: Some(chrono::Utc::now()),
+    });
+    event
 }
 
 #[test]
@@ -217,23 +413,79 @@ fn watch_json_exits_cleanly_on_sigterm() {
         nix::sys::signal::Signal::SIGTERM,
     )
     .expect("send sigterm");
+    if !wait_for_child_exit(&mut child, Duration::from_secs(3)) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = wait_for_child_exit(&mut child, Duration::from_secs(3));
+    }
+}
+
+#[test]
+fn watch_json_exits_cleanly_on_sigint() {
+    let home = temp_home("watch-sigint");
+    let mut child = spawn_leash(&home, &["--json", "watch"]);
+
+    thread::sleep(Duration::from_millis(900));
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGINT,
+    )
+    .expect("send sigint");
 
     let started = SystemTime::now();
+    let mut exited = false;
     loop {
         if child.try_wait().expect("try_wait watch process").is_some() {
+            exited = true;
             break;
         }
         if started
             .elapsed()
-            .expect("elapsed since start")
+            .expect("elapsed since signal sent")
             .gt(&Duration::from_secs(3))
         {
-            let _ = child.kill();
-            let _ = child.wait();
             break;
         }
         thread::sleep(Duration::from_millis(100));
     }
+
+    if !exited {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        let _ = wait_for_child_exit(&mut child, Duration::from_secs(8));
+    }
+}
+
+#[test]
+fn start_status_stop_lifecycle_works() {
+    let home = temp_home("start-stop");
+    let mut child = spawn_leash(&home, &["--json", "start"]);
+    thread::sleep(Duration::from_millis(900));
+
+    let status_running = run_leash(&home, &["--json", "status"]);
+    assert!(
+        status_running.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status_running.stderr)
+    );
+    let status_json: Value =
+        serde_json::from_slice(&status_running.stdout).expect("status output should be json");
+    assert_eq!(status_json["running"], true);
+
+    let stop = run_leash(&home, &["--json", "stop"]);
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(
+        wait_for_child_exit(&mut child, Duration::from_secs(5)),
+        "start process should exit after stop command"
+    );
 }
 
 #[test]
@@ -254,6 +506,53 @@ fn invalid_config_produces_helpful_error_message() {
     let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
     assert!(stderr.contains("invalid YAML in config file"));
     assert!(stderr.contains("bad-config.yaml"));
+}
+
+#[test]
+fn missing_explicit_config_path_falls_back_to_defaults() {
+    let home = temp_home("missing-config");
+    let config_path = home.join("does-not-exist.yaml");
+    let output = Command::new(env!("CARGO_BIN_EXE_leash"))
+        .args(["--json", "--config"])
+        .arg(&config_path)
+        .arg("test")
+        .env("HOME", &home)
+        .output()
+        .expect("run leash with missing config path");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn unreadable_config_file_produces_helpful_error() {
+    let home = temp_home("config-permissions");
+    let config_path = home.join("unreadable.yaml");
+    fs::write(&config_path, "monitor_interval_ms: 1000\n").expect("write config");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&config_path).expect("metadata").permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&config_path, perms).expect("set unreadable permissions");
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_leash"))
+        .args(["--json", "--config"])
+        .arg(&config_path)
+        .arg("test")
+        .env("HOME", &home)
+        .output()
+        .expect("run leash with unreadable config");
+
+    assert!(
+        !output.status.success(),
+        "unreadable config should fail on unix-like systems"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(stderr.contains("failed to read config file"));
 }
 
 #[test]
@@ -355,4 +654,170 @@ fn export_json_supports_severity_and_last_filters() {
     let value: Value = serde_json::from_str(lines[0]).expect("ndjson row should parse");
     assert_eq!(value["threat_level"], "yellow");
     assert_eq!(value["narrative"], "recent yellow");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webhook_valid_url_receives_alert_posts() {
+    let Some(server) = MockWebhookServer::start(MockResponse {
+        status: 200,
+        body: "ok".to_string(),
+        delay: Duration::ZERO,
+    }) else {
+        return;
+    };
+    let home = temp_home("webhook-valid");
+    write_config(
+        &home,
+        &format!(
+            "alerts:\n  min_severity: green\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+            server.url()
+        ),
+    );
+
+    let output = run_leash(&home, &["--json", "test"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(server.request_count() >= 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webhook_invalid_url_does_not_crash_test_command() {
+    let home = temp_home("webhook-invalid");
+    write_config(
+        &home,
+        "alerts:\n  min_severity: green\n  slack:\n    enabled: true\n    url: \"not-a-url\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+    );
+    let output = run_leash(&home, &["--json", "test"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webhook_404_and_500_are_non_fatal() {
+    for (status, label) in [(404_u16, "webhook-404"), (500_u16, "webhook-500")] {
+        let Some(server) = MockWebhookServer::start(MockResponse {
+            status,
+            body: "error".to_string(),
+            delay: Duration::ZERO,
+        }) else {
+            return;
+        };
+        let home = temp_home(label);
+        write_config(
+            &home,
+            &format!(
+                "alerts:\n  min_severity: green\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+                server.url()
+            ),
+        );
+
+        let output = run_leash(&home, &["--json", "test"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(server.request_count() >= 4);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webhook_timeout_behavior_is_non_fatal() {
+    let Some(server) = MockWebhookServer::start(MockResponse {
+        status: 200,
+        body: "ok".to_string(),
+        delay: Duration::from_millis(1300),
+    }) else {
+        return;
+    };
+    let home = temp_home("webhook-timeout-like");
+    write_config(
+        &home,
+        &format!(
+            "alerts:\n  min_severity: red\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+            server.url()
+        ),
+    );
+
+    let output = run_leash(&home, &["--json", "test"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiting_coalesces_duplicate_alerts() {
+    let Some(server) = MockWebhookServer::start(MockResponse {
+        status: 200,
+        body: "ok".to_string(),
+        delay: Duration::ZERO,
+    }) else {
+        return;
+    };
+    let mut cfg = Config::default();
+    cfg.alerts.min_severity = "green".to_string();
+    cfg.alerts.rate_limit_seconds = 60;
+    cfg.alerts.slack.enabled = true;
+    cfg.alerts.slack.url = server.url();
+    cfg.alerts.discord.enabled = false;
+    cfg.alerts.telegram.enabled = false;
+
+    let (tx, rx) = tokio::sync::broadcast::channel::<SecurityEvent>(16);
+    let dispatcher = AlertDispatcher::new(cfg, rx).expect("build dispatcher");
+    let task = tokio::spawn(async move { dispatcher.run().await });
+
+    let event = alert_event(EventType::ProcessNew, 4242, ThreatLevel::Red);
+    let _ = tx.send(event.clone());
+    let _ = tx.send(event);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+
+    assert_eq!(server.request_count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_severity_threshold_triggers_expected_alert_volume() {
+    for (severity, expected) in [
+        ("green", 4_usize),
+        ("yellow", 3_usize),
+        ("orange", 2_usize),
+        ("red", 1_usize),
+    ] {
+        let Some(server) = MockWebhookServer::start(MockResponse {
+            status: 200,
+            body: "ok".to_string(),
+            delay: Duration::ZERO,
+        }) else {
+            return;
+        };
+        let home = temp_home(&format!("severity-{severity}"));
+        write_config(
+            &home,
+            &format!(
+                "alerts:\n  min_severity: {severity}\n  rate_limit_seconds: 0\n  slack:\n    enabled: true\n    url: \"{}\"\n  discord:\n    enabled: false\n  telegram:\n    enabled: false\n",
+                server.url()
+            ),
+        );
+
+        let output = run_leash(&home, &["--json", "test"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            server.request_count(),
+            expected,
+            "unexpected alert count for severity {severity}"
+        );
+    }
 }

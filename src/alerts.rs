@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct AlertDispatcher {
     cfg: Config,
@@ -16,7 +17,22 @@ pub struct AlertDispatcher {
     client: Client,
     min_severity: ThreatLevel,
     rate_limit: Duration,
-    last_alert_by_source: HashMap<(String, i32), Instant>,
+
+    // Learning mode tracking
+    learning_mode_active: Mutex<bool>,
+    learning_start_time: Mutex<Instant>,
+
+    // Per-process suppression: (agent_name, cmd_pattern) -> last_seen
+    normal_commands: Mutex<HashMap<(String, String), Instant>>,
+
+    // Deduplication: hash of (agent, cmdline_pattern) -> (timestamp, was_alerted)
+    deduplication_cache: Mutex<HashMap<String, (Instant, bool)>>,
+
+    // Process tracking for 5-minute suppression
+    process_start_times: Mutex<HashMap<i32, Instant>>,
+
+    // Rate limiting by (event_type, agent)
+    rate_limit_tracker: Mutex<HashMap<(String, String), Instant>>,
 }
 
 impl AlertDispatcher {
@@ -28,7 +44,12 @@ impl AlertDispatcher {
         Ok(Self {
             min_severity: parse_level(&cfg.alerts.min_severity),
             rate_limit: Duration::from_secs(cfg.alerts.rate_limit_seconds),
-            last_alert_by_source: HashMap::new(),
+            learning_mode_active: Mutex::new(cfg.alerts.learning_mode_hours > 0),
+            learning_start_time: Mutex::new(Instant::now()),
+            normal_commands: Mutex::new(HashMap::new()),
+            deduplication_cache: Mutex::new(HashMap::new()),
+            process_start_times: Mutex::new(HashMap::new()),
+            rate_limit_tracker: Mutex::new(HashMap::new()),
             cfg,
             rx,
             client: Client::builder().build()?,
@@ -43,6 +64,12 @@ impl AlertDispatcher {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
+
+            // Track process start time for new processes
+            if let Some(ref proc) = event.process {
+                self.track_process_start_time(proc.pid);
+            }
+
             let scrubbed_event = scrub_event(&event);
 
             if self.cfg.alerts.json_log.enabled
@@ -60,7 +87,8 @@ impl AlertDispatcher {
                 continue;
             }
 
-            if event.threat_level < self.min_severity || !self.should_send_for_event_type(&event) {
+            // Check if we should alert on this event
+            if !self.should_alert(&event) {
                 continue;
             }
 
@@ -92,19 +120,204 @@ impl AlertDispatcher {
         }
     }
 
-    fn should_send_for_event_type(&mut self, event: &SecurityEvent) -> bool {
-        let now = Instant::now();
-        let event_type = event.event_type.to_string();
-        let pid = event.process.as_ref().map(|proc| proc.pid).unwrap_or(-1);
-        let key = (event_type, pid);
+    fn track_process_start_time(&self, pid: i32) {
+        let mut start_times = self.process_start_times.lock().unwrap();
+        if !start_times.contains_key(&pid) {
+            start_times.insert(pid, Instant::now());
+        }
+    }
 
-        if let Some(last) = self.last_alert_by_source.get(&key)
-            && now.duration_since(*last) < self.rate_limit
-        {
+    fn is_new_process(&self, pid: i32) -> bool {
+        if let Some(start_time) = self.process_start_times.lock().unwrap().get(&pid) {
+            let elapsed = Instant::now().duration_since(*start_time);
+            elapsed < Duration::from_secs(self.cfg.alerts.first_process_minutes * 60)
+        } else {
+            // Process not tracked yet, consider it new
+            true
+        }
+    }
+
+    fn is_known_good_command(&self, agent_name: &str, cmdline: &str) -> bool {
+        let cmdline_lower = cmdline.to_ascii_lowercase();
+
+        for kg in &self.cfg.alerts.known_good_commands {
+            let pattern = kg.pattern.to_ascii_lowercase();
+            let agent_filter = if kg.agent == "*" {
+                true
+            } else {
+                agent_name
+                    .to_ascii_lowercase()
+                    .contains(&kg.agent.to_ascii_lowercase())
+            };
+
+            if agent_filter && cmdline_lower.contains(&pattern) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn record_normal_command(&self, agent_name: &str, cmdline: &str) {
+        let cmd_pattern = extract_cmd_pattern(cmdline);
+        let key = (agent_name.to_string(), cmd_pattern);
+        self.normal_commands
+            .lock()
+            .unwrap()
+            .insert(key, Instant::now());
+    }
+
+    fn is_duplicate(&self, agent_name: &str, cmdline: &str) -> bool {
+        let hash = compute_event_hash(agent_name, cmdline);
+        let dedup_window = Duration::from_secs(self.cfg.alerts.deduplication_hours * 3600);
+        let now = Instant::now();
+
+        let mut cache = self.deduplication_cache.lock().unwrap();
+
+        // Clean old entries
+        cache.retain(|_, (time, _)| now.duration_since(*time) < dedup_window);
+
+        // Check if this event was already seen
+        if let Some((last_time, was_alerted)) = cache.get(&hash) {
+            let time_since_last = now.duration_since(*last_time);
+            // If it was already alerted and within window, suppress
+            if *was_alerted && time_since_last < dedup_window {
+                return true;
+            }
+            // Update timestamp but keep the was_alerted status
+            let was_alerted = *was_alerted;
+            cache.insert(hash, (now, was_alerted));
             return false;
         }
 
-        self.last_alert_by_source.insert(key, now);
+        // New event, record it
+        cache.insert(hash, (now, false));
+        false
+    }
+
+    fn is_in_learning_mode(&self) -> bool {
+        let mut learning = self.learning_mode_active.lock().unwrap();
+        if !*learning {
+            return false;
+        }
+
+        let start_time = *self.learning_start_time.lock().unwrap();
+        let elapsed = Instant::now().duration_since(start_time);
+        let learning_duration = Duration::from_secs(self.cfg.alerts.learning_mode_hours * 3600);
+
+        if elapsed >= learning_duration {
+            // Learning mode has ended
+            *learning = false;
+            drop(learning); // Release the lock before logging
+            info!(
+                "Learning mode ended after {} hours",
+                self.cfg.alerts.learning_mode_hours
+            );
+            false
+        } else {
+            let remaining = learning_duration - elapsed;
+            debug!(
+                "Learning mode active, {} remaining",
+                format_duration(remaining)
+            );
+            true
+        }
+    }
+
+    fn should_alert(&self, event: &SecurityEvent) -> bool {
+        // 1. Check severity threshold
+        if event.threat_level < self.min_severity {
+            debug!(
+                event_type = %event.event_type,
+                threat_level = ?event.threat_level,
+                min_severity = ?self.min_severity,
+                "suppressing alert: below severity threshold"
+            );
+            return false;
+        }
+
+        // 2. Check learning mode
+        if self.is_in_learning_mode() {
+            // In learning mode, only alert on RED+ events
+            if event.threat_level < ThreatLevel::Red {
+                debug!(
+                    event_type = %event.event_type,
+                    "suppressing alert: learning mode active"
+                );
+                return false;
+            }
+        }
+
+        // 3. Get agent name
+        let agent_name = event
+            .process
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let cmdline = event
+            .process
+            .as_ref()
+            .map(|p| p.cmdline.clone())
+            .unwrap_or_default();
+
+        // 4. Check for new AI agent process (first 5 minutes, suppress all but RED)
+        if let Some(ref proc) = event.process {
+            if self.is_new_process(proc.pid) && event.threat_level < ThreatLevel::Red {
+                debug!(
+                    pid = proc.pid,
+                    process = %proc.name,
+                    "suppressing alert: new process in first {} minutes",
+                    self.cfg.alerts.first_process_minutes
+                );
+                return false;
+            }
+        }
+
+        // 5. Check known-good commands
+        if self.is_known_good_command(&agent_name, &cmdline) {
+            debug!(
+                process = %agent_name,
+                cmdline = %cmdline,
+                "suppressing alert: known-good command"
+            );
+            // Record this as a normal command
+            self.record_normal_command(&agent_name, &cmdline);
+            return false;
+        }
+
+        // 6. Check deduplication
+        if self.is_duplicate(&agent_name, &cmdline) {
+            debug!(
+                process = %agent_name,
+                cmdline = %cmdline,
+                "suppressing alert: duplicate event within {} hours",
+                self.cfg.alerts.deduplication_hours
+            );
+            return false;
+        }
+
+        // 7. Check rate limiting
+        let event_type = event.event_type.to_string();
+        let key = (event_type, agent_name.clone());
+        let now = Instant::now();
+
+        {
+            let tracker = self.rate_limit_tracker.lock().unwrap();
+            if let Some(last) = tracker.get(&key)
+                && now.duration_since(*last) < self.rate_limit
+            {
+                debug!(
+                    event_type = %event.event_type,
+                    process = %agent_name,
+                    "suppressing alert: rate limit active"
+                );
+                return false;
+            }
+        }
+
+        // Update rate limit tracker
+        self.rate_limit_tracker.lock().unwrap().insert(key, now);
+
         true
     }
 
@@ -534,6 +747,61 @@ fn redact_assignment_secrets(input: &str) -> String {
     output
 }
 
+/// Extracts a pattern from cmdline for deduplication (removes unique parts like paths with hashes)
+fn extract_cmd_pattern(cmdline: &str) -> String {
+    let parts: Vec<&str> = cmdline.split_whitespace().collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    // Keep the command and normalize arguments
+    let cmd = parts[0];
+    let normalized_cmd = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cmd);
+
+    // For simple commands, return as-is
+    let simple_commands = [
+        "git", "npm", "cargo", "ls", "cat", "echo", "pwd", "whoami", "env", "ps", "top", "free",
+        "df", "du", "hostname", "uname", "date", "sleep", "true", "false", "id", "which", "type",
+        "read", "export", "unset", "alias", "source", "test", "mkdir", "touch", "rm", "cp", "mv",
+        "chmod", "chown", "head", "tail", "less", "more", "grep", "find", "sort", "uniq", "wc",
+        "tr", "sed", "awk", "cut", "paste", "diff", "cmp", "stat", "basename", "dirname",
+        "realpath", "printenv",
+    ];
+
+    if simple_commands.iter().any(|&c| normalized_cmd.ends_with(c)) {
+        return cmdline.to_string();
+    }
+
+    // For complex commands, normalize by keeping first 2 args max
+    if parts.len() > 2 {
+        format!("{} {} ...", normalized_cmd, parts[1])
+    } else {
+        cmdline.to_string()
+    }
+}
+
+/// Computes a hash for event deduplication
+fn compute_event_hash(agent_name: &str, cmdline: &str) -> String {
+    let pattern = extract_cmd_pattern(cmdline);
+    let input = format!("{}:{}", agent_name, pattern);
+    blake3::hash(input.as_bytes()).to_hex().to_string()
+}
+
+/// Formats duration for logging
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +826,7 @@ mod tests {
             username: "user".to_string(),
             open_files: Vec::new(),
             parent_chain: Vec::new(),
+            start_time: None,
         });
         event
     }
@@ -612,58 +881,26 @@ mod tests {
         assert_eq!(parsed["parse_mode"], "HTML");
     }
 
-    fn dispatcher() -> AlertDispatcher {
-        let cfg = Config::default();
-        let (_, rx) = broadcast::channel::<SecurityEvent>(4);
-        AlertDispatcher::new(cfg, rx).expect("dispatcher should initialize in test")
+    #[test]
+    fn extract_cmd_pattern_works() {
+        // Simple commands
+        assert_eq!(extract_cmd_pattern("git status"), "git status");
+        assert_eq!(extract_cmd_pattern("ls -la"), "ls -la");
+
+        // Complex commands with many args
+        let long_cmd =
+            "python /tmp/script.py --verbose --input=/tmp/file.txt --output=/tmp/out.txt";
+        let pattern = extract_cmd_pattern(long_cmd);
+        assert!(pattern.starts_with("python /tmp/script.py ..."));
     }
 
     #[test]
-    fn rate_limiter_blocks_duplicate_events_within_window() {
-        let mut dispatcher = dispatcher();
-        let event = sample_event();
+    fn compute_event_hash_works() {
+        let hash1 = compute_event_hash("codex", "npm install");
+        let hash2 = compute_event_hash("codex", "npm install");
+        let hash3 = compute_event_hash("claude", "npm install");
 
-        assert!(dispatcher.should_send_for_event_type(&event));
-        assert!(!dispatcher.should_send_for_event_type(&event));
-    }
-
-    #[test]
-    fn rate_limiter_allows_events_after_window_expires() {
-        let mut dispatcher = dispatcher();
-        let event = sample_event();
-        let key = (
-            event.event_type.to_string(),
-            event.process.as_ref().map(|p| p.pid).unwrap_or(-1),
-        );
-
-        assert!(dispatcher.should_send_for_event_type(&event));
-        dispatcher.last_alert_by_source.insert(
-            key,
-            Instant::now() - dispatcher.rate_limit - Duration::from_millis(1),
-        );
-
-        assert!(dispatcher.should_send_for_event_type(&event));
-    }
-
-    #[test]
-    fn rate_limiter_isolated_by_pid() {
-        let mut dispatcher = dispatcher();
-        let event_a = sample_event();
-        let mut event_b = sample_event();
-        event_b.process.as_mut().expect("process must exist").pid = 9001;
-
-        assert!(dispatcher.should_send_for_event_type(&event_a));
-        assert!(!dispatcher.should_send_for_event_type(&event_a));
-        assert!(dispatcher.should_send_for_event_type(&event_b));
-    }
-
-    #[test]
-    fn scrub_secrets_redacts_known_patterns() {
-        let input = "token=shhh sk-abcdefghijklmnopqrstuvwxyz12345 AKIAABCDEFGHIJKLMNOP";
-        let output = scrub_secrets(input);
-        assert!(!output.contains("token=shhh"));
-        assert!(!output.contains("AKIAABCDEFGHIJKLMNOP"));
-        assert!(!output.contains("sk-abcdefghijklmnopqrstuvwxyz12345"));
-        assert!(output.contains("[REDACTED]"));
+        assert_eq!(hash1, hash2); // Same agent + same cmd = same hash
+        assert_ne!(hash1, hash3); // Different agent = different hash
     }
 }

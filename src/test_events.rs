@@ -1,5 +1,6 @@
 use crate::mitre::infer_and_tag;
 use crate::models::{EventType, FileEvent, NetConnection, ProcessInfo, SecurityEvent, ThreatLevel};
+use chrono::Utc;
 
 pub fn build_test_events() -> Vec<SecurityEvent> {
     let green_proc = ProcessInfo {
@@ -11,6 +12,7 @@ pub fn build_test_events() -> Vec<SecurityEvent> {
         cwd: "/home/user/project".to_string(),
         username: "user".to_string(),
         open_files: vec![],
+        start_time: Some(Utc::now()),
         parent_chain: vec!["bash(2211)".to_string(), "tmux(1111)".to_string()],
     };
 
@@ -23,6 +25,7 @@ pub fn build_test_events() -> Vec<SecurityEvent> {
         cwd: "/home/user/project".to_string(),
         username: "user".to_string(),
         open_files: vec!["/tmp/bootstrap.sh".to_string()],
+        start_time: Some(Utc::now()),
         parent_chain: vec!["codex(4242)".to_string(), "bash(2211)".to_string()],
     };
 
@@ -35,6 +38,7 @@ pub fn build_test_events() -> Vec<SecurityEvent> {
         cwd: "/home/user/project".to_string(),
         username: "user".to_string(),
         open_files: vec![],
+        start_time: Some(Utc::now()),
         parent_chain: vec!["codex(4242)".to_string(), "bash(2211)".to_string()],
     };
 
@@ -47,6 +51,7 @@ pub fn build_test_events() -> Vec<SecurityEvent> {
         cwd: "/home/user".to_string(),
         username: "user".to_string(),
         open_files: vec!["/home/user/.ssh/id_rsa".to_string()],
+        start_time: Some(Utc::now()),
         parent_chain: vec!["codex(4242)".to_string(), "bash(2211)".to_string()],
     };
 

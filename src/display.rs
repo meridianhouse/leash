@@ -259,6 +259,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             username: "user".to_string(),
             open_files: Vec::new(),
+            start_time: None,
             parent_chain: vec!["bash(200)".to_string(), "tmux(100)".to_string()],
         };
 

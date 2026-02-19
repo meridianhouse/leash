@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::mitre;
 use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, ThreatLevel};
+use nix::libc;
 use procfs::process::Process;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -345,6 +346,7 @@ impl ProcessCollector {
         let raw_open_fds = self.read_open_fds(pid);
         let raw_env = self.read_env_of_interest(pid);
         let (memory_rss_kb, memory_vmsize_kb, username) = self.read_status_fields(pid);
+        let start_time = self.read_start_time(pid);
         let is_ai_agent = self.is_ai_agent(&stat.comm, &raw_cmdline, &raw_exe);
         let cmdline = scrub_secrets(&raw_cmdline);
         let exe = scrub_secrets(&raw_exe);
@@ -368,6 +370,7 @@ impl ProcessCollector {
             username,
             open_files: open_fds.clone(),
             parent_chain: Vec::new(),
+            start_time,
         };
 
         let enrichment = ProcessEnrichment {
@@ -384,6 +387,61 @@ impl ProcessCollector {
             enrichment,
             is_ai_agent,
         })
+    }
+
+    fn read_start_time(&self, pid: i32) -> Option<chrono::DateTime<chrono::Utc>> {
+        let stat_path = format!("/proc/{}/stat", pid);
+        let stat = match fs::read_to_string(stat_path) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+
+        // Start time is field 22 in /proc/pid/stat (comm, state, ppid, pgrp, session, tty_nr, ...)
+        // Field indices start at 1, so field 22 is at index 21
+        let parts: Vec<&str> = stat.split_whitespace().collect();
+        if parts.len() < 22 {
+            return None;
+        }
+
+        // Field 22 is the start time in clock ticks
+        let start_ticks: u64 = match parts[21].parse() {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+
+        // Get clock ticks per second
+        let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+        if ticks_per_sec <= 0.0 {
+            return None;
+        }
+
+        let secs_since_boot = start_ticks as f64 / ticks_per_sec;
+
+        // Calculate absolute time using boot time
+        let boot_time = match Self::get_boot_time() {
+            Some(bt) => bt,
+            None => return None,
+        };
+
+        let start_time =
+            boot_time + chrono::Duration::milliseconds((secs_since_boot * 1000.0) as i64);
+        Some(start_time)
+    }
+
+    fn get_boot_time() -> Option<chrono::DateTime<chrono::Utc>> {
+        let uptime_path = "/proc/uptime";
+        let uptime = match fs::read_to_string(uptime_path) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+
+        let uptime_secs: f64 = match uptime.split_whitespace().next().unwrap_or("0").parse() {
+            Ok(u) => u,
+            Err(_) => return None,
+        };
+
+        let now = chrono::Utc::now();
+        Some(now - chrono::Duration::seconds(uptime_secs as i64))
     }
 
     fn is_ai_agent(&self, name: &str, cmdline: &str, exe: &str) -> bool {

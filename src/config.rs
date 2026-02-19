@@ -52,6 +52,14 @@ pub struct AlertsConfig {
     pub min_severity: String,
     #[serde(default = "default_alert_rate_limit_seconds")]
     pub rate_limit_seconds: u64,
+    #[serde(default = "default_learning_mode_hours")]
+    pub learning_mode_hours: u64,
+    #[serde(default)]
+    pub known_good_commands: Vec<KnownGoodCommand>,
+    #[serde(default = "default_deduplication_hours")]
+    pub deduplication_hours: u64,
+    #[serde(default = "default_first_process_minutes")]
+    pub first_process_minutes: u64,
     #[serde(default)]
     pub slack: SlackAlertConfig,
     #[serde(default)]
@@ -60,6 +68,14 @@ pub struct AlertsConfig {
     pub telegram: TelegramAlertConfig,
     #[serde(default)]
     pub json_log: JsonLogConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownGoodCommand {
+    #[serde(default)]
+    pub pattern: String,
+    #[serde(default)]
+    pub agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -146,6 +162,10 @@ impl Default for AlertsConfig {
         Self {
             min_severity: default_alert_min_severity(),
             rate_limit_seconds: default_alert_rate_limit_seconds(),
+            learning_mode_hours: default_learning_mode_hours(),
+            known_good_commands: Vec::new(),
+            deduplication_hours: default_deduplication_hours(),
+            first_process_minutes: default_first_process_minutes(),
             slack: SlackAlertConfig::default(),
             discord: DiscordAlertConfig::default(),
             telegram: TelegramAlertConfig::default(),
@@ -311,11 +331,23 @@ fn default_response_level() -> String {
 }
 
 fn default_alert_min_severity() -> String {
-    "yellow".into()
+    "orange".into()
 }
 
 fn default_alert_rate_limit_seconds() -> u64 {
-    60
+    300
+}
+
+fn default_learning_mode_hours() -> u64 {
+    24
+}
+
+fn default_deduplication_hours() -> u64 {
+    24
+}
+
+fn default_first_process_minutes() -> u64 {
+    5
 }
 
 fn default_ai_agents() -> Vec<String> {
@@ -516,8 +548,8 @@ mod tests {
     fn default_config_yaml_parses() {
         let parsed: Config = serde_yaml::from_str(include_str!("../config/default.yaml"))
             .expect("default.yaml should parse");
-        assert_eq!(parsed.alerts.min_severity, "yellow");
-        assert_eq!(parsed.alerts.rate_limit_seconds, 60);
+        assert_eq!(parsed.alerts.min_severity, "orange");
+        assert_eq!(parsed.alerts.rate_limit_seconds, 300);
         assert!(
             parsed
                 .ai_agents

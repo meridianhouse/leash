@@ -100,6 +100,7 @@ fn property_security_event_always_serializes_to_valid_json() {
             username: "user".to_string(),
             open_files: Vec::new(),
             parent_chain: Vec::new(),
+            start_time: Some(chrono::Utc::now()),
         });
 
         let json = serde_json::to_string(&event).expect("serialize event");

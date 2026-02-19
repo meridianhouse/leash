@@ -1,8 +1,6 @@
 [build]
 rustflags = [
   "-C", "target-cpu=native",
-  "-C", "opt-level=3",
-  "-C", "lto=fat",
   "-C", "link-arg=-Wl,--gc-sections",
   "-C", "strip=symbols",
   "-C", "link-arg=-Wl,-z,relro,-z,now",
