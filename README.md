@@ -170,7 +170,7 @@ sudo systemctl start leash
 git clone https://github.com/meridianhouse/leash.git
 cd leash
 cargo build --release
-# Binary at ./target/release/leash (7.3 MB)
+# Binary at ./target/release/leash (~6 MB stripped)
 ```
 
 Requirements: Rust 1.75+, Linux (x86_64 or aarch64)

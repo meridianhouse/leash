@@ -7,6 +7,7 @@ pub trait KernelMonitor {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct EbpfMonitor;
 
 impl KernelMonitor for EbpfMonitor {
