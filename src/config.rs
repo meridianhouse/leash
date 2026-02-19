@@ -238,12 +238,58 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        let mut errors = Vec::new();
+
+        if self.monitor_interval_ms < 100 {
+            errors.push(format!(
+                "monitor_interval_ms must be at least 100 (got {})",
+                self.monitor_interval_ms
+            ));
+        }
+
         validate_level(&self.alerts.min_severity, "alerts.min_severity")?;
         validate_level(&self.response.stop_min_level, "response.stop_min_level")?;
+
+        if !has_enabled_alert_sink(&self.alerts) {
+            errors.push(
+                "alerts config must enable at least one sink: alerts.json_log, alerts.slack, alerts.discord, or alerts.telegram".to_string(),
+            );
+        }
+        if self.alerts.json_log.enabled && self.alerts.json_log.path.trim().is_empty() {
+            errors.push("alerts.json_log.enabled is true but alerts.json_log.path is empty".into());
+        }
+        if self.alerts.slack.enabled && self.alerts.slack.url.trim().is_empty() {
+            errors.push("alerts.slack.enabled is true but alerts.slack.url is empty".into());
+        }
+        if self.alerts.discord.enabled && self.alerts.discord.url.trim().is_empty() {
+            errors.push("alerts.discord.enabled is true but alerts.discord.url is empty".into());
+        }
+        if self.alerts.telegram.enabled && self.alerts.telegram.token.trim().is_empty() {
+            errors.push("alerts.telegram.enabled is true but alerts.telegram.token is empty".into());
+        }
+        if self.alerts.telegram.enabled && self.alerts.telegram.chat_id.trim().is_empty() {
+            errors.push("alerts.telegram.enabled is true but alerts.telegram.chat_id is empty".into());
+        }
+
+        for (name, url) in [
+            ("alerts.slack.url", self.alerts.slack.url.trim()),
+            ("alerts.discord.url", self.alerts.discord.url.trim()),
+        ] {
+            if !url.is_empty() && !is_valid_http_or_https_url(url) {
+                errors.push(format!(
+                    "{name} must start with http:// or https:// (got '{url}')"
+                ));
+            }
+        }
+
         for (index, entry) in self.allow_list.iter().enumerate() {
             if entry.name.trim().is_empty() {
-                bail!("allow_list[{index}].name cannot be empty");
+                errors.push(format!("allow_list[{index}].name cannot be empty"));
             }
+        }
+
+        if !errors.is_empty() {
+            bail!("{}", errors.join("\n"));
         }
         Ok(())
     }
@@ -539,6 +585,18 @@ fn is_valid_https_url(raw: &str) -> bool {
     parsed.scheme().eq_ignore_ascii_case("https") && parsed.host_str().is_some()
 }
 
+fn is_valid_http_or_https_url(raw: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw.trim()) else {
+        return false;
+    };
+    (parsed.scheme().eq_ignore_ascii_case("http") || parsed.scheme().eq_ignore_ascii_case("https"))
+        && parsed.host_str().is_some()
+}
+
+fn has_enabled_alert_sink(alerts: &AlertsConfig) -> bool {
+    alerts.json_log.enabled || alerts.slack.enabled || alerts.discord.enabled || alerts.telegram.enabled
+}
+
 fn is_valid_telegram_token(raw: &str) -> bool {
     let token = raw.trim();
     let Some((bot_id, secret)) = token.split_once(':') else {
@@ -699,5 +757,52 @@ egress:
                 .iter()
                 .any(|w| w.contains("https://discord.com/api/webhooks/<id>/<token>"))
         );
+    }
+
+    #[test]
+    fn rejects_scan_interval_under_100ms() {
+        let err = Config::from_yaml_str(
+            r#"
+monitor_interval_ms: 99
+alerts:
+  json_log:
+    enabled: true
+"#,
+        )
+        .expect_err("interval below 100ms should fail validation");
+        assert!(err.to_string().contains("monitor_interval_ms must be at least 100"));
+    }
+
+    #[test]
+    fn rejects_webhook_urls_without_http_or_https_scheme() {
+        let err = Config::from_yaml_str(
+            r#"
+alerts:
+  slack:
+    enabled: true
+    url: ftp://hooks.slack.com/services/T/B/KEY
+"#,
+        )
+        .expect_err("invalid scheme should fail validation");
+        assert!(err.to_string().contains("alerts.slack.url must start with http:// or https://"));
+    }
+
+    #[test]
+    fn rejects_empty_alert_configuration() {
+        let err = Config::from_yaml_str(
+            r#"
+alerts:
+  json_log:
+    enabled: false
+  slack:
+    enabled: false
+  discord:
+    enabled: false
+  telegram:
+    enabled: false
+"#,
+        )
+        .expect_err("all alert sinks disabled should fail validation");
+        assert!(err.to_string().contains("alerts config must enable at least one sink"));
     }
 }
