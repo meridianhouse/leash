@@ -1,0 +1,13 @@
+<svg width="1200" height="630" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#0a0a0f"/>
+  <text x="600" y="200" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="120" font-weight="800" fill="#6366f1">🐕 Leash</text>
+  <text x="600" y="310" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="36" fill="#e0e0e0">Put your AI on a short leash.</text>
+  <text x="600" y="400" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="20" fill="#888">
+    <tspan fill="#22c55e">🟢</tspan> process_spawn  
+    <tspan fill="#eab308">🟡</tspan> file_access  
+    <tspan fill="#f97316">🟠</tspan> credential  
+    <tspan fill="#ef4444">🔴</tspan> file_modify
+  </text>
+  <text x="600" y="500" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="24" fill="#6366f1">Open-source AI agent visibility tool</text>
+  <text x="600" y="570" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="18" fill="#555">github.com/meridianhouse/leash</text>
+</svg>
