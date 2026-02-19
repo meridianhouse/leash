@@ -31,6 +31,16 @@ pub enum Commands {
     Scan,
     #[command(about = "Show daemon status")]
     Status,
+    #[command(about = "Show stored event history")]
+    History {
+        #[arg(long, help = "Time window to query (supported: 1h, 24h)")]
+        last: Option<String>,
+        #[arg(
+            long,
+            help = "Filter by severity (green, yellow, orange, red, nuclear)"
+        )]
+        severity: Option<String>,
+    },
     #[command(about = "Stop Leash daemon")]
     Stop,
 }

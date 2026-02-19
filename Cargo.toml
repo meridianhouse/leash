@@ -29,6 +29,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 notify = "6"
 blake3 = "1"
 nix = { version = "0.29", features = ["signal", "process"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dependencies]
 tokio.workspace = true
@@ -44,5 +45,6 @@ reqwest.workspace = true
 notify.workspace = true
 blake3.workspace = true
 nix.workspace = true
+rusqlite.workspace = true
 nu-ansi-term = "0.50.3"
 anyhow = { path = "third_party/anyhow" }

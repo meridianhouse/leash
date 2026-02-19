@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::display::render_watch_ui;
 use crate::egress::EgressMonitor;
 use crate::fim::FileIntegrityMonitor;
+use crate::history;
 use crate::models::SecurityEvent;
 use crate::response::ResponseEngine;
 use crate::test_events::build_test_events;
@@ -46,6 +47,9 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     let alerts = AlertDispatcher::new(cfg.clone(), event_tx.subscribe())?;
     let response = ResponseEngine::new(cfg.clone(), event_tx.subscribe());
     let watchdog = Watchdog::new(cfg.clone(), event_tx.clone());
+    let history_tx = event_tx.clone();
+    let history_handle =
+        tokio::spawn(async move { history::record_events(history_tx.subscribe()).await });
 
     let watch_handle = if watch_mode {
         Some(tokio::spawn(watch_events(
@@ -73,6 +77,7 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     alerts_handle.abort();
     response_handle.abort();
     watchdog_handle.abort();
+    history_handle.abort();
     if let Some(handle) = watch_handle {
         handle.abort();
     }
@@ -84,6 +89,9 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
 pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynError> {
     let (event_tx, _) = broadcast::channel::<SecurityEvent>(64);
     let alerts = AlertDispatcher::new(cfg, event_tx.subscribe())?;
+    let history_tx = event_tx.clone();
+    let history_handle =
+        tokio::spawn(async move { history::record_events(history_tx.subscribe()).await });
     let alerts_handle = tokio::spawn(async move { alerts.run().await });
 
     let started_at = chrono::Utc::now();
@@ -109,6 +117,7 @@ pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynEr
     }
 
     sleep(Duration::from_secs(2)).await;
+    history_handle.abort();
     alerts_handle.abort();
     Ok(())
 }

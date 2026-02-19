@@ -9,6 +9,7 @@ mod display;
 mod ebpf;
 mod egress;
 mod fim;
+mod history;
 mod mitre;
 mod models;
 mod response;
@@ -48,6 +49,9 @@ async fn main() -> Result<(), app::DynError> {
             scan::run_scan(cfg, cli.json)?;
         }
         Commands::Status => print_status(cli.json)?,
+        Commands::History { last, severity } => {
+            history::print_history(last.as_deref(), severity.as_deref(), cli.json)?;
+        }
         Commands::Stop => stop_agent(cli.json)?,
     }
 
