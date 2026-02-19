@@ -84,6 +84,12 @@ pub struct JsonLogConfig {
 pub struct EgressConfig {
     #[serde(default = "default_suspicious_ports")]
     pub suspicious_ports: Vec<u16>,
+    #[serde(default = "default_tor_ports")]
+    pub tor_ports: Vec<u16>,
+    #[serde(default = "default_exfil_domains")]
+    pub exfil_domains: Vec<String>,
+    #[serde(default = "default_suspicious_country_ip_prefixes")]
+    pub suspicious_country_ip_prefixes: Vec<String>,
 }
 
 impl Default for Config {
@@ -171,6 +177,9 @@ impl Default for EgressConfig {
     fn default() -> Self {
         Self {
             suspicious_ports: default_suspicious_ports(),
+            tor_ports: default_tor_ports(),
+            exfil_domains: default_exfil_domains(),
+            suspicious_country_ip_prefixes: default_suspicious_country_ip_prefixes(),
         }
     }
 }
@@ -220,7 +229,16 @@ fn default_alert_min_level() -> String {
 }
 
 fn default_ai_agents() -> Vec<String> {
-    vec!["claude".into(), "codex".into(), "gpt".into(), "node".into()]
+    vec![
+        "claude".into(),
+        "claude_code".into(),
+        "codex".into(),
+        "cursor".into(),
+        "gpt".into(),
+        "aider".into(),
+        "cline".into(),
+        "node".into(),
+    ]
 }
 
 fn default_legit_ai_parents() -> Vec<String> {
@@ -264,6 +282,18 @@ fn default_fim_paths() -> Vec<String> {
 
 fn default_suspicious_ports() -> Vec<u16> {
     vec![4444, 4445, 5555, 6666, 7777, 8888, 9999, 1337, 31337]
+}
+
+fn default_tor_ports() -> Vec<u16> {
+    (9000..=9053).collect()
+}
+
+fn default_exfil_domains() -> Vec<String> {
+    vec!["pastebin".into(), "transfer.sh".into(), "file.io".into()]
+}
+
+fn default_suspicious_country_ip_prefixes() -> Vec<String> {
+    Vec::new()
 }
 
 fn default_config_path() -> PathBuf {

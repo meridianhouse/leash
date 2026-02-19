@@ -102,12 +102,22 @@ impl ProcessCollector {
         let ancestry_names: Vec<String> = ancestry.iter().map(|(_, name)| name.clone()).collect();
         let ancestry_text = ancestry_names.join(" -> ");
         let is_descendant = ancestry.len() > 1;
+        let process_level = if snapshot.is_ai_agent {
+            ThreatLevel::Orange
+        } else {
+            ThreatLevel::Green
+        };
+        let process_label = if snapshot.is_ai_agent {
+            "AI agent process detected"
+        } else {
+            "Monitored process observed"
+        };
 
         events.push(self.make_event(
             EventType::ProcessNew,
-            ThreatLevel::Green,
+            process_level,
             format!(
-                "Monitored process observed: {} (pid={}) | ancestry: {}",
+                "{process_label}: {} (pid={}) | ancestry: {}",
                 snapshot.info.name, snapshot.info.pid, ancestry_text
             ),
             snapshot,
@@ -125,78 +135,48 @@ impl ProcessCollector {
             ));
         }
 
-        if is_descendant {
-            let sensitive_hits: Vec<String> = snapshot
-                .enrichment
-                .open_fds
-                .iter()
-                .filter(|fd| {
-                    self.cfg
-                        .sensitive_path_keywords
-                        .iter()
-                        .any(|k| fd.to_ascii_lowercase().contains(&k.to_ascii_lowercase()))
-                })
-                .take(4)
-                .cloned()
-                .collect();
-
-            if !sensitive_hits.is_empty() {
-                events.push(self.make_event(
-                    EventType::CredentialAccess,
-                    ThreatLevel::Red,
-                    format!(
-                        "Monitored child accessed sensitive paths: {ancestry_text} | fds={} ",
-                        sensitive_hits.join(", ")
-                    ),
-                    snapshot,
-                    all,
-                ));
-            }
+        let credential_hits = detect_credential_paths(&snapshot.enrichment.open_fds);
+        if !credential_hits.is_empty() {
+            events.push(self.make_event(
+                EventType::CredentialAccess,
+                ThreatLevel::Red,
+                format!(
+                    "Monitored process accessed credential material: {ancestry_text} | files={}",
+                    credential_hits.join(", ")
+                ),
+                snapshot,
+                all,
+            ));
         }
 
-        if is_descendant {
-            let lower_cmd = snapshot.info.cmdline.to_ascii_lowercase();
-            let suspicious = [
-                "curl ",
-                "wget ",
-                " nc ",
-                "ncat ",
-                "base64",
-                "python -c",
-                " eval ",
-            ];
-            let matched: Vec<&str> = suspicious
-                .iter()
-                .copied()
-                .filter(|needle| lower_cmd.contains(needle))
-                .collect();
-
-            if !matched.is_empty() || lower_cmd.starts_with("nc ") || lower_cmd.starts_with("ncat ")
-            {
-                let mut matched = matched;
-                if lower_cmd.starts_with("nc ") {
-                    matched.push("nc ");
-                }
-                if lower_cmd.starts_with("ncat ") {
-                    matched.push("ncat ");
-                }
-                let url = extract_url(&snapshot.info.cmdline).unwrap_or_default();
-                let chain = if url.is_empty() {
-                    ancestry_text.clone()
-                } else {
-                    format!("{ancestry_text} -> {url}")
-                };
-                events.push(self.make_event(
-                    EventType::NetworkSuspicious,
-                    ThreatLevel::Orange,
-                    format!(
-                        "Monitored suspicious command(s) [{}] | ancestry: {chain}",
-                        matched.join(",")
-                    ),
-                    snapshot,
-                    all,
-                ));
-            }
+        let dangerous_hits =
+            detect_dangerous_commands(&snapshot.info.cmdline, &snapshot.enrichment.working_dir);
+        if !dangerous_hits.is_empty() {
+            let level = if dangerous_hits.iter().any(|hit| {
+                hit.contains("write_sensitive_path")
+                    || hit.contains("download_exec")
+                    || hit.contains("encoded_python")
+            }) {
+                ThreatLevel::Red
+            } else {
+                ThreatLevel::Orange
+            };
+            let url = extract_url(&snapshot.info.cmdline).unwrap_or_default();
+            let chain = if url.is_empty() {
+                ancestry_text.clone()
+            } else {
+                format!("{ancestry_text} -> {url}")
+            };
+            events.push(self.make_event(
+                EventType::NetworkSuspicious,
+                level,
+                format!(
+                    "Dangerous command pattern(s) [{}] | ancestry: {chain}",
+                    dangerous_hits.join(",")
+                ),
+                snapshot,
+                all,
+            ));
         }
 
         events
@@ -352,10 +332,18 @@ impl ProcessCollector {
         let name = name.to_ascii_lowercase();
         let cmdline = cmdline.to_ascii_lowercase();
         let exe = exe.to_ascii_lowercase();
-        self.cfg.ai_agents.iter().any(|agent| {
+        let configured_match = self.cfg.ai_agents.iter().any(|agent| {
             let needle = agent.to_ascii_lowercase();
             name.contains(&needle) || cmdline.contains(&needle) || exe.contains(&needle)
-        })
+        });
+        if configured_match {
+            return true;
+        }
+
+        let cmdline_needles = ["anthropic", "claude-code", "cursor.sh", "opencode"];
+        cmdline_needles
+            .iter()
+            .any(|needle| cmdline.contains(needle) || exe.contains(needle))
     }
 
     fn read_open_fds(&self, pid: i32) -> Vec<String> {
@@ -413,7 +401,11 @@ impl ProcessCollector {
             } else if let Some(rest) = line.strip_prefix("VmSize:") {
                 vmsize = parse_status_kb(rest);
             } else if let Some(rest) = line.strip_prefix("Uid:") {
-                username = rest.split_whitespace().next().unwrap_or_default().to_string();
+                username = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
             }
         }
 
@@ -430,4 +422,178 @@ fn extract_url(cmdline: &str) -> Option<String> {
         .split_whitespace()
         .find(|part| part.starts_with("http://") || part.starts_with("https://"))
         .map(ToString::to_string)
+}
+
+fn detect_credential_paths(open_fds: &[String]) -> Vec<String> {
+    const TARGETS: &[&str] = &[
+        "/.ssh/id_rsa",
+        "/.ssh/id_ed25519",
+        "/.ssh/known_hosts",
+        "/.aws/credentials",
+        "/.aws/config",
+        "/.gitconfig",
+        "/.npmrc",
+        "/.netrc",
+    ];
+
+    open_fds
+        .iter()
+        .filter_map(|fd| {
+            let normalized = fd.to_ascii_lowercase();
+            TARGETS
+                .iter()
+                .find(|needle| normalized.ends_with(**needle))
+                .map(|_| fd.clone())
+        })
+        .take(6)
+        .collect()
+}
+
+fn detect_dangerous_commands(cmdline: &str, working_dir: &str) -> Vec<&'static str> {
+    let lower = cmdline.to_ascii_lowercase();
+    let mut hits = Vec::new();
+
+    if (lower.contains("curl ")
+        || lower.contains("wget ")
+        || lower.contains("fetch ")
+        || lower.contains("http://")
+        || lower.contains("https://"))
+        && (lower.contains("| bash")
+            || lower.contains("| sh")
+            || lower.contains("| /bin/bash")
+            || lower.contains("| /bin/sh"))
+    {
+        hits.push("download_pipe_shell");
+    }
+
+    if lower.contains("wget ")
+        && (lower.contains("-o - | sh")
+            || lower.contains("-o -|sh")
+            || lower.contains("-o- | sh")
+            || lower.contains("-o- |sh"))
+    {
+        hits.push("wget_pipe_shell");
+    }
+
+    if lower.contains("base64 -d") || lower.contains("base64 --decode") {
+        hits.push("base64_decode");
+    }
+
+    if (lower.contains("python -c") || lower.contains("python3 -c")) && lower.contains("base64") {
+        hits.push("encoded_python");
+    }
+
+    if lower.contains(" eval ") || lower.starts_with("eval ") {
+        hits.push("eval_execution");
+    }
+
+    if let Some(host) = extract_ssh_target_host(&lower) {
+        if is_unusual_ssh_host(&host) {
+            hits.push("ssh_unusual_host");
+        }
+    }
+
+    if (lower.starts_with("nc ") || lower.contains(" nc ") || lower.starts_with("ncat "))
+        && lower.contains(" -l")
+    {
+        hits.push("netcat_listener");
+    }
+
+    if lower.contains("chmod +x")
+        && (lower.contains("http://")
+            || lower.contains("https://")
+            || lower.contains("curl ")
+            || lower.contains("wget ")
+            || lower.contains("/tmp/")
+            || working_dir.starts_with("/tmp"))
+    {
+        hits.push("download_exec");
+    }
+
+    if (lower.contains("touch ") || lower.contains("mkdir ")) && references_sensitive_paths(&lower)
+    {
+        hits.push("touch_mkdir_sensitive");
+    }
+
+    if references_sensitive_paths(&lower)
+        && (lower.contains(" > /etc")
+            || lower.contains(" >> /etc")
+            || lower.contains("tee /etc")
+            || lower.contains("cp ")
+            || lower.contains("mv ")
+            || lower.contains("install "))
+    {
+        hits.push("write_sensitive_path");
+    }
+
+    hits
+}
+
+fn extract_ssh_target_host(cmdline: &str) -> Option<String> {
+    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
+    if tokens.first().copied() != Some("ssh") {
+        return None;
+    }
+
+    let mut idx = 1;
+    while idx < tokens.len() {
+        let tok = tokens[idx];
+        if tok == "-p" || tok == "-i" || tok == "-l" || tok == "-o" || tok == "-f" || tok == "-n" {
+            idx += 2;
+            continue;
+        }
+        if tok.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+
+        let host = tok
+            .split('@')
+            .next_back()
+            .unwrap_or_default()
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_string();
+        return (!host.is_empty()).then_some(host);
+    }
+
+    None
+}
+
+fn is_unusual_ssh_host(host: &str) -> bool {
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return false;
+    }
+    if host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".internal") {
+        return false;
+    }
+
+    if let Some((a, b, _, _)) = parse_ipv4_octets(host) {
+        if a == 10 {
+            return false;
+        }
+        if a == 172 && (16..=31).contains(&b) {
+            return false;
+        }
+        if a == 192 && b == 168 {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn references_sensitive_paths(text: &str) -> bool {
+    text.contains("/etc/") || text.contains("/usr/bin/") || text.contains("/bin/")
+}
+
+fn parse_ipv4_octets(host: &str) -> Option<(u8, u8, u8, u8)> {
+    let mut parts = host.split('.');
+    let a = parts.next()?.parse::<u8>().ok()?;
+    let b = parts.next()?.parse::<u8>().ok()?;
+    let c = parts.next()?.parse::<u8>().ok()?;
+    let d = parts.next()?.parse::<u8>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((a, b, c, d))
 }

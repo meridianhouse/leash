@@ -54,6 +54,48 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         add_technique(&mut event, "T1048");
     }
 
+    if combined.contains("download_pipe_shell")
+        || combined.contains("wget_pipe_shell")
+        || (combined.contains("curl ") && combined.contains("| bash"))
+        || (combined.contains("wget ") && combined.contains("| sh"))
+    {
+        add_technique(&mut event, "T1105");
+    }
+
+    if combined.contains("base64 -d")
+        || combined.contains("base64 --decode")
+        || combined.contains("base64_decode")
+        || combined.contains("encoded_python")
+    {
+        add_technique(&mut event, "T1027");
+    }
+
+    if combined.contains("ssh_unusual_host")
+        || combined.starts_with("ssh ")
+        || combined.contains(" ssh ")
+    {
+        add_technique(&mut event, "T1021.004");
+    }
+
+    if combined.contains("known_exfil_service")
+        || combined.contains("pastebin")
+        || combined.contains("transfer.sh")
+        || combined.contains("file.io")
+    {
+        add_technique(&mut event, "T1567");
+    }
+
+    if combined.contains("tor_port") || combined.contains("9050") || combined.contains("9051") {
+        add_technique(&mut event, "T1090");
+    }
+
+    if combined.contains("chmod +x")
+        || combined.contains("download_exec")
+        || combined.contains("write_sensitive_path")
+    {
+        add_technique(&mut event, "T1222.001");
+    }
+
     let persistence_path = event
         .file_event
         .as_ref()
@@ -118,12 +160,27 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
             "Credential Access",
             "Unsecured Credentials: Credentials In Files",
         ),
-        "T1071.001" => ("Command and Control", "Application Layer Protocol: Web Protocols"),
+        "T1071.001" => (
+            "Command and Control",
+            "Application Layer Protocol: Web Protocols",
+        ),
         "T1071" => ("Command and Control", "Application Layer Protocol"),
         "T1048" => ("Exfiltration", "Exfiltration Over Alternative Protocol"),
         "T1547.001" => (
             "Persistence",
             "Boot/Logon Autostart: systemd or cron modification",
+        ),
+        "T1105" => ("Command and Control", "Ingress Tool Transfer"),
+        "T1027" => (
+            "Defense Evasion",
+            "Obfuscated/Compressed Files and Information",
+        ),
+        "T1021.004" => ("Lateral Movement", "Remote Services: SSH"),
+        "T1567" => ("Exfiltration", "Exfiltration Over Web Service"),
+        "T1090" => ("Command and Control", "Proxy"),
+        "T1222.001" => (
+            "Defense Evasion",
+            "File and Directory Permissions Modification: Linux and Mac File and Directory Permissions Modification",
         ),
         "T1005" => ("Collection", "Data from Local System"),
         "T1562.001" => (

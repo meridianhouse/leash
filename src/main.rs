@@ -380,15 +380,18 @@ fn run_scan(cfg: Config, json_output: bool) -> Result<(), DynError> {
         };
 
         let monitored = collect_descendants(root_pid, &children);
-        let process_tree = build_scan_tree(root_pid, &process_table, &children)
-            .unwrap_or_else(|| ScanProcessNode {
-                pid: root_process.pid,
-                name: root_process.name.clone(),
-                cmdline: root_process.cmdline.clone(),
-                children: Vec::new(),
+        let process_tree =
+            build_scan_tree(root_pid, &process_table, &children).unwrap_or_else(|| {
+                ScanProcessNode {
+                    pid: root_process.pid,
+                    name: root_process.name.clone(),
+                    cmdline: root_process.cmdline.clone(),
+                    children: Vec::new(),
+                }
             });
         let mut network_connections = collect_network_connections(&monitored, &process_table);
-        let mut sensitive_open_files = collect_sensitive_open_files(&monitored, &process_table, &cfg);
+        let mut sensitive_open_files =
+            collect_sensitive_open_files(&monitored, &process_table, &cfg);
 
         network_connections.sort_by(|a, b| {
             a.pid
@@ -435,7 +438,10 @@ fn render_scan_report(report: &ScanReport) {
     println!(
         "{}  {}",
         Style::new().bold().paint("LEASH SCAN"),
-        report.timestamp.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S")
+        report
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
     );
     println!("{}", "─".repeat(90));
 
@@ -479,7 +485,12 @@ fn render_scan_report(report: &ScanReport) {
             println!("    none");
         } else {
             for fd in &agent.sensitive_open_files {
-                println!("    {} ({}) {}", fd.process_name, fd.pid, truncate(&fd.path, 120));
+                println!(
+                    "    {} ({}) {}",
+                    fd.process_name,
+                    fd.pid,
+                    truncate(&fd.path, 120)
+                );
             }
         }
         println!("{}", Style::new().dimmed().paint("·".repeat(90)));
@@ -516,7 +527,11 @@ fn collect_process_table() -> HashMap<i32, ProcessEntry> {
         };
 
         let pid = stat.pid;
-        let cmdline = process.cmdline().ok().map(|c| c.join(" ")).unwrap_or_default();
+        let cmdline = process
+            .cmdline()
+            .ok()
+            .map(|c| c.join(" "))
+            .unwrap_or_default();
         let exe = process
             .exe()
             .ok()
@@ -543,10 +558,17 @@ fn is_ai_agent_process(process: &ProcessEntry, cfg: &Config) -> bool {
     let cmdline = process.cmdline.to_ascii_lowercase();
     let exe = process.exe.to_ascii_lowercase();
 
-    cfg.ai_agents.iter().any(|agent| {
+    let configured_match = cfg.ai_agents.iter().any(|agent| {
         let needle = agent.to_ascii_lowercase();
         name.contains(&needle) || cmdline.contains(&needle) || exe.contains(&needle)
-    })
+    });
+    if configured_match {
+        return true;
+    }
+
+    ["anthropic", "claude-code", "cursor.sh", "opencode"]
+        .iter()
+        .any(|needle| cmdline.contains(needle) || exe.contains(needle))
 }
 
 fn build_children_map(process_table: &HashMap<i32, ProcessEntry>) -> HashMap<i32, Vec<i32>> {
@@ -790,7 +812,10 @@ fn tcp_state_name(code: &str) -> &'static str {
     }
 }
 
-fn render_watch_ui(recent_events: &VecDeque<SecurityEvent>, started_at: chrono::DateTime<chrono::Utc>) {
+fn render_watch_ui(
+    recent_events: &VecDeque<SecurityEvent>,
+    started_at: chrono::DateTime<chrono::Utc>,
+) {
     print!("\x1b[2J\x1b[H");
     let now = chrono::Local::now();
     let uptime = chrono::Utc::now() - started_at;
@@ -815,7 +840,13 @@ fn render_watch_ui(recent_events: &VecDeque<SecurityEvent>, started_at: chrono::
             Color::Cyan.paint(format!("[{}]", event.event_type)),
             event.narrative
         );
-        println!("   time: {}", event.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S"));
+        println!(
+            "   time: {}",
+            event
+                .timestamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+        );
         if let Some(process) = &event.process {
             println!(
                 "   proc: {} ({})  exe: {}",
@@ -866,7 +897,13 @@ fn truncate(value: &str, max_len: usize) -> String {
     if value.chars().count() <= max_len {
         value.to_string()
     } else {
-        format!("{}...", value.chars().take(max_len.saturating_sub(3)).collect::<String>())
+        format!(
+            "{}...",
+            value
+                .chars()
+                .take(max_len.saturating_sub(3))
+                .collect::<String>()
+        )
     }
 }
 

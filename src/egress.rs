@@ -57,10 +57,10 @@ impl EgressMonitor {
                     continue;
                 }
 
-                let (pid, name) = inode_to_proc
+                let (pid, name, cmdline) = inode_to_proc
                     .get(&parsed.inode)
                     .cloned()
-                    .unwrap_or_else(|| (0, String::new()));
+                    .unwrap_or_else(|| (0, String::new(), String::new()));
 
                 let conn = NetConnection {
                     local_addr: parsed.local_addr,
@@ -72,7 +72,8 @@ impl EgressMonitor {
                     process_name: name,
                 };
 
-                let suspicious = self.cfg.egress.suspicious_ports.contains(&conn.remote_port);
+                let suspicious_reasons = self.suspicious_reasons(&conn, &cmdline);
+                let suspicious = !suspicious_reasons.is_empty();
                 let level = if suspicious {
                     ThreatLevel::Orange
                 } else {
@@ -84,9 +85,17 @@ impl EgressMonitor {
                     EventType::NetworkNewConnection
                 };
 
-                let mut event = SecurityEvent::new(
-                    event_type,
-                    level,
+                let narrative = if suspicious {
+                    format!(
+                        "Suspicious network connection {}:{} -> {}:{} (pid={}) reasons=[{}]",
+                        conn.local_addr,
+                        conn.local_port,
+                        conn.remote_addr,
+                        conn.remote_port,
+                        conn.pid,
+                        suspicious_reasons.join(",")
+                    )
+                } else {
                     format!(
                         "Network connection {}:{} -> {}:{} (pid={})",
                         conn.local_addr,
@@ -94,14 +103,54 @@ impl EgressMonitor {
                         conn.remote_addr,
                         conn.remote_port,
                         conn.pid
-                    ),
-                );
+                    )
+                };
+                let mut event = SecurityEvent::new(event_type, level, narrative);
                 event.connection = Some(conn);
                 let _ = self.tx.send(mitre::infer_and_tag(event));
             }
         }
 
         self.prev = seen;
+    }
+
+    fn suspicious_reasons(&self, conn: &NetConnection, process_cmdline: &str) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.cfg.egress.suspicious_ports.contains(&conn.remote_port) {
+            reasons.push("reverse_shell_port");
+        }
+        if self.cfg.egress.tor_ports.contains(&conn.remote_port) {
+            reasons.push("tor_port");
+        }
+        if self.is_suspicious_country_ip(&conn.remote_addr) {
+            reasons.push("suspicious_country_ip");
+        }
+        if self.uses_exfil_service(process_cmdline) {
+            reasons.push("known_exfil_service");
+        }
+        reasons
+    }
+
+    fn uses_exfil_service(&self, process_cmdline: &str) -> bool {
+        let lower = process_cmdline.to_ascii_lowercase();
+        self.cfg
+            .egress
+            .exfil_domains
+            .iter()
+            .any(|domain| lower.contains(&domain.to_ascii_lowercase()))
+    }
+
+    fn is_suspicious_country_ip(&self, remote_addr: &str) -> bool {
+        let addr = remote_addr.to_ascii_lowercase();
+        self.cfg
+            .egress
+            .suspicious_country_ip_prefixes
+            .iter()
+            .map(|item| item.to_ascii_lowercase())
+            .any(|item| {
+                let prefix = item.trim_end_matches('*');
+                addr == prefix || addr.starts_with(prefix)
+            })
     }
 }
 
@@ -155,8 +204,8 @@ fn parse_addr_port(raw: &str) -> Option<(String, u16)> {
     Some((addr, port))
 }
 
-fn inode_to_process() -> HashMap<u64, (i32, String)> {
-    let mut map = HashMap::new();
+fn inode_to_process() -> HashMap<u64, (i32, String, String)> {
+    let mut map: HashMap<u64, (i32, String, String)> = HashMap::new();
     let all = match procfs::process::all_processes() {
         Ok(v) => v,
         Err(_) => return map,
@@ -173,6 +222,11 @@ fn inode_to_process() -> HashMap<u64, (i32, String)> {
             .ok()
             .map(|s| s.comm)
             .unwrap_or_else(|| String::new());
+        let cmdline = process
+            .cmdline()
+            .ok()
+            .map(|parts| parts.join(" "))
+            .unwrap_or_default();
         let fds = match process.fd() {
             Ok(fds) => fds,
             Err(_) => continue,
@@ -180,7 +234,8 @@ fn inode_to_process() -> HashMap<u64, (i32, String)> {
 
         for fd in fds.flatten() {
             if let FDTarget::Socket(inode) = fd.target {
-                map.entry(inode).or_insert((pid, comm.clone()));
+                map.entry(inode)
+                    .or_insert((pid, comm.clone(), cmdline.clone()));
             }
         }
     }
