@@ -13,6 +13,13 @@ pub struct Cli {
     #[arg(long, global = true, help = "Enable eBPF kernel monitoring (preview)")]
     pub ebpf: bool,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Detect events but do not send alerts; print would-be alerts to stdout"
+    )]
+    pub dry_run: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

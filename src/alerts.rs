@@ -15,6 +15,7 @@ pub struct AlertDispatcher {
     cfg: Config,
     rx: broadcast::Receiver<SecurityEvent>,
     client: Client,
+    dry_run: bool,
     min_severity: ThreatLevel,
     rate_limit: Duration,
 
@@ -54,8 +55,10 @@ impl AlertDispatcher {
     pub fn new(
         cfg: Config,
         rx: broadcast::Receiver<SecurityEvent>,
+        dry_run: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
+            dry_run,
             min_severity: parse_level(&cfg.alerts.min_severity),
             rate_limit: Duration::from_secs(cfg.alerts.rate_limit_seconds),
             learning_mode_active: Mutex::new(cfg.alerts.learning_mode_hours > 0),
@@ -101,7 +104,8 @@ impl AlertDispatcher {
             let enriched_event = with_process_tree_context(&event);
             let scrubbed_event = scrub_event(&enriched_event);
 
-            if self.cfg.alerts.json_log.enabled
+            if !self.dry_run
+                && self.cfg.alerts.json_log.enabled
                 && let Err(err) = self.write_local_log(&scrubbed_event)
             {
                 error!(?err, "failed to write alert log");
@@ -110,7 +114,8 @@ impl AlertDispatcher {
             let (is_duplicate, dedup_summaries) = self.process_deduplication(&event);
             for summary in dedup_summaries {
                 let scrubbed_summary = scrub_event(&summary);
-                if self.cfg.alerts.json_log.enabled
+                if !self.dry_run
+                    && self.cfg.alerts.json_log.enabled
                     && let Err(err) = self.write_local_log(&scrubbed_summary)
                 {
                     error!(?err, "failed to write alert log");
@@ -371,6 +376,11 @@ impl AlertDispatcher {
     }
 
     async fn dispatch_to_sinks(&self, event: &SecurityEvent) {
+        if self.dry_run {
+            self.print_dry_run_alert(event);
+            return;
+        }
+
         if self.cfg.alerts.slack.enabled
             && !self.cfg.alerts.slack.url.is_empty()
             && let Err(err) = self.send_slack(&self.cfg.alerts.slack.url, event).await
@@ -391,6 +401,13 @@ impl AlertDispatcher {
             && let Err(err) = self.send_telegram(event).await
         {
             warn!(?err, "telegram delivery failed");
+        }
+    }
+
+    fn print_dry_run_alert(&self, event: &SecurityEvent) {
+        match serde_json::to_string(event) {
+            Ok(line) => println!("DRY-RUN would alert: {line}"),
+            Err(_) => println!("DRY-RUN would alert: {}", event.narrative),
         }
     }
 
@@ -1233,7 +1250,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.alerts.deduplication_enabled = false;
         let (_tx, rx) = broadcast::channel(8);
-        let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+        let dispatcher = AlertDispatcher::new(cfg, rx, false).expect("dispatcher");
         let event = sample_event();
 
         let (dup1, summaries1) = dispatcher.process_deduplication(&event);
@@ -1251,7 +1268,7 @@ mod tests {
         cfg.alerts.deduplication_window_seconds = 300;
 
         let (_tx, rx) = broadcast::channel(8);
-        let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+        let dispatcher = AlertDispatcher::new(cfg, rx, false).expect("dispatcher");
         let event = sample_event();
 
         let (first_dup, first_summaries) = dispatcher.process_deduplication(&event);
@@ -1269,7 +1286,7 @@ mod tests {
         cfg.alerts.deduplication_window_seconds = 1;
 
         let (_tx, rx) = broadcast::channel(8);
-        let dispatcher = AlertDispatcher::new(cfg, rx).expect("dispatcher");
+        let dispatcher = AlertDispatcher::new(cfg, rx, false).expect("dispatcher");
         let event = sample_event();
         let _ = dispatcher.process_deduplication(&event);
         let _ = dispatcher.process_deduplication(&event);

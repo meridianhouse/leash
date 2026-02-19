@@ -36,7 +36,12 @@ pub fn init_tracing() {
         .init();
 }
 
-pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Result<(), DynError> {
+pub async fn run_agent(
+    cfg: Config,
+    watch_mode: bool,
+    json_output: bool,
+    dry_run: bool,
+) -> Result<(), DynError> {
     ensure_single_instance()?;
     write_pid_file()?;
 
@@ -48,7 +53,7 @@ pub async fn run_agent(cfg: Config, watch_mode: bool, json_output: bool) -> Resu
     let collector = ProcessCollector::new(cfg.clone(), event_tx.clone());
     let egress = EgressMonitor::new(cfg.clone(), event_tx.clone());
     let fim = FileIntegrityMonitor::new(cfg.clone(), event_tx.clone())?;
-    let alerts = AlertDispatcher::new(cfg.clone(), event_tx.subscribe())?;
+    let alerts = AlertDispatcher::new(cfg.clone(), event_tx.subscribe(), dry_run)?;
     let response = ResponseEngine::new(cfg.clone(), event_tx.subscribe());
     let watchdog = Watchdog::new(cfg.clone(), event_tx.clone());
     let max_history_mb = cfg.max_history_mb;
@@ -140,7 +145,7 @@ fn install_signal_handlers() -> Result<(), DynError> {
 pub async fn run_test_alerts(cfg: Config, json_output: bool) -> Result<(), DynError> {
     let (event_tx, _) = broadcast::channel::<SecurityEvent>(64);
     let max_history_mb = cfg.max_history_mb;
-    let alerts = AlertDispatcher::new(cfg, event_tx.subscribe())?;
+    let alerts = AlertDispatcher::new(cfg, event_tx.subscribe(), false)?;
     let history_tx = event_tx.clone();
     let history_handle = tokio::spawn(async move {
         history::record_events(history_tx.subscribe(), max_history_mb).await

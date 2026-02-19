@@ -55,11 +55,11 @@ async fn main() -> Result<(), app::DynError> {
         Commands::Init => init_config(cli.json)?,
         Commands::Start => {
             let cfg = Config::load(cli.config.as_deref())?;
-            run_agent(cfg, false, cli.json).await?;
+            run_agent(cfg, false, cli.json, cli.dry_run).await?;
         }
         Commands::Watch => {
             let cfg = Config::load(cli.config.as_deref())?;
-            run_agent(cfg, true, cli.json).await?;
+            run_agent(cfg, true, cli.json, cli.dry_run).await?;
         }
         Commands::Test => {
             let cfg = Config::load(cli.config.as_deref())?;

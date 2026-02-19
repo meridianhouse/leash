@@ -785,7 +785,7 @@ async fn rate_limiting_coalesces_duplicate_alerts() {
     cfg.alerts.telegram.enabled = false;
 
     let (tx, rx) = tokio::sync::broadcast::channel::<SecurityEvent>(16);
-    let dispatcher = AlertDispatcher::new(cfg, rx).expect("build dispatcher");
+    let dispatcher = AlertDispatcher::new(cfg, rx, false).expect("build dispatcher");
     let task = tokio::spawn(async move { dispatcher.run().await });
 
     let event = alert_event(EventType::ProcessNew, 4242, ThreatLevel::Red);
