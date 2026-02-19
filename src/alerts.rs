@@ -230,14 +230,30 @@ fn event_details(event: &SecurityEvent) -> EventDetails {
         .unwrap_or_else(|| "-".into());
     let mitre_id = event
         .mitre
-        .as_ref()
+        .iter()
         .map(|m| m.technique_id.clone())
-        .unwrap_or_else(|| "-".into());
+        .collect::<Vec<_>>()
+        .join(", ")
+        .trim()
+        .to_string();
+    let mitre_id = if mitre_id.is_empty() {
+        "-".to_string()
+    } else {
+        mitre_id
+    };
     let mitre_technique = event
         .mitre
-        .as_ref()
+        .iter()
         .map(|m| format!("{} {}", m.technique_id, m.name))
-        .unwrap_or_else(|| "-".into());
+        .collect::<Vec<_>>()
+        .join("; ")
+        .trim()
+        .to_string();
+    let mitre_technique = if mitre_technique.is_empty() {
+        "-".to_string()
+    } else {
+        mitre_technique
+    };
 
     EventDetails {
         event_type: event.event_type.to_string(),

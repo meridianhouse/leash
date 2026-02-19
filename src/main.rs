@@ -194,8 +194,14 @@ fn render_watch_ui(recent_events: &VecDeque<SecurityEvent>, started_at: chrono::
         if let Some(file_event) = &event.file_event {
             println!("   path: {}", truncate(&file_event.path, 80));
         }
-        if let Some(mitre) = &event.mitre {
-            println!("   mitre: {} {}", mitre.technique_id, mitre.name);
+        if !event.mitre.is_empty() {
+            let techniques = event
+                .mitre
+                .iter()
+                .map(|m| format!("{} {}", m.technique_id, m.name))
+                .collect::<Vec<_>>()
+                .join("; ");
+            println!("   mitre: {techniques}");
         }
         println!("{}", Style::new().dimmed().paint("·".repeat(90)));
     }

@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +93,16 @@ pub struct MitreMapping {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessEnrichment {
+    pub full_cmdline: String,
+    pub working_dir: String,
+    pub env: HashMap<String, String>,
+    pub open_fds: Vec<String>,
+    pub memory_rss_kb: Option<u64>,
+    pub memory_vmsize_kb: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityEvent {
     pub event_type: EventType,
     pub threat_level: ThreatLevel,
@@ -100,7 +111,9 @@ pub struct SecurityEvent {
     pub process: Option<ProcessInfo>,
     pub connection: Option<NetConnection>,
     pub file_event: Option<FileEvent>,
-    pub mitre: Option<MitreMapping>,
+    #[serde(default)]
+    pub mitre: Vec<MitreMapping>,
+    pub enrichment: Option<ProcessEnrichment>,
     pub response_taken: Option<String>,
 }
 
@@ -114,7 +127,8 @@ impl SecurityEvent {
             process: None,
             connection: None,
             file_event: None,
-            mitre: None,
+            mitre: Vec::new(),
+            enrichment: None,
             response_taken: None,
         }
     }
