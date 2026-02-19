@@ -91,36 +91,7 @@ impl AlertDispatcher {
         url: &str,
         event: &SecurityEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let details = event_details(event);
-        let payload = json!({
-            "text": format!("[{}] {}", level_label(event.threat_level), event.narrative),
-            "attachments": [{
-                "color": slack_color(event.threat_level),
-                "blocks": [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": format!("*Leash Alert* {} *{}*\n{}", severity_badge(event.threat_level), level_label(event.threat_level), event.narrative)
-                        },
-                        "fields": [
-                            { "type": "mrkdwn", "text": format!("*Type*\n`{}`", details.event_type) },
-                            { "type": "mrkdwn", "text": format!("*Process*\n`{}`", details.process) },
-                            { "type": "mrkdwn", "text": format!("*PID*\n`{}`", details.pid) },
-                            { "type": "mrkdwn", "text": format!("*Path*\n`{}`", details.path) },
-                            { "type": "mrkdwn", "text": format!("*MITRE Technique*\n`{}`", details.mitre_technique) }
-                        ]
-                    },
-                    {
-                        "type": "context",
-                        "elements": [
-                            { "type": "mrkdwn", "text": format!("{}", event.timestamp.to_rfc3339()) },
-                            { "type": "mrkdwn", "text": "Leash • AI Agent Visibility" }
-                        ]
-                    }
-                ]
-            }]
-        });
+        let payload = build_slack_payload(event);
 
         self.client
             .post(url)
@@ -137,23 +108,7 @@ impl AlertDispatcher {
         url: &str,
         event: &SecurityEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let details = event_details(event);
-        let payload = json!({
-            "embeds": [{
-                "title": format!("Leash Alert {}", severity_badge(event.threat_level)),
-                "description": event.narrative,
-                "color": discord_color(event.threat_level),
-                "fields": [
-                    { "name": "Event", "value": details.event_type, "inline": true },
-                    { "name": "Process", "value": details.process, "inline": true },
-                    { "name": "PID", "value": details.pid, "inline": true },
-                    { "name": "Path", "value": details.path, "inline": false },
-                    { "name": "MITRE ID", "value": details.mitre_id, "inline": true }
-                ],
-                "footer": { "text": "Leash • AI Agent Visibility" },
-                "timestamp": event.timestamp.to_rfc3339()
-            }]
-        });
+        let payload = build_discord_payload(event);
 
         self.client
             .post(url)
@@ -172,27 +127,7 @@ impl AlertDispatcher {
         let token = &self.cfg.alerts.telegram.token;
         let chat_id = &self.cfg.alerts.telegram.chat_id;
         let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-        let details = event_details(event);
-
-        let text = format!(
-            "<b>{} Leash Alert ({})</b>\n{}\n\n<b>Event:</b> <code>{}</code>\n<b>Process:</b> <code>{}</code>\n<b>PID:</b> <code>{}</code>\n<b>Path:</b> <code>{}</code>\n<b>MITRE ID:</b> <code>{}</code>\n<b>Timestamp:</b> <code>{}</code>",
-            severity_badge(event.threat_level),
-            level_label(event.threat_level),
-            escape_html(&event.narrative),
-            escape_html(&details.event_type),
-            escape_html(&details.process),
-            escape_html(&details.pid),
-            escape_html(&details.path),
-            escape_html(&details.mitre_id),
-            escape_html(&event.timestamp.to_rfc3339())
-        );
-
-        let payload = json!({
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": true
-        });
+        let payload = build_telegram_payload(event, chat_id);
 
         self.client
             .post(url)
@@ -268,6 +203,82 @@ fn event_details(event: &SecurityEvent) -> EventDetails {
     }
 }
 
+fn build_slack_payload(event: &SecurityEvent) -> serde_json::Value {
+    let details = event_details(event);
+    json!({
+        "text": format!("[{}] {}", level_label(event.threat_level), event.narrative),
+        "attachments": [{
+            "color": slack_color(event.threat_level),
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": format!("*Leash Alert* {} *{}*\n{}", severity_badge(event.threat_level), level_label(event.threat_level), event.narrative)
+                    },
+                    "fields": [
+                        { "type": "mrkdwn", "text": format!("*Type*\n`{}`", details.event_type) },
+                        { "type": "mrkdwn", "text": format!("*Process*\n`{}`", details.process) },
+                        { "type": "mrkdwn", "text": format!("*PID*\n`{}`", details.pid) },
+                        { "type": "mrkdwn", "text": format!("*Path*\n`{}`", details.path) },
+                        { "type": "mrkdwn", "text": format!("*MITRE Technique*\n`{}`", details.mitre_technique) }
+                    ]
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        { "type": "mrkdwn", "text": event.timestamp.to_rfc3339() },
+                        { "type": "mrkdwn", "text": "Leash • AI Agent Visibility" }
+                    ]
+                }
+            ]
+        }]
+    })
+}
+
+fn build_discord_payload(event: &SecurityEvent) -> serde_json::Value {
+    let details = event_details(event);
+    json!({
+        "embeds": [{
+            "title": format!("Leash Alert {}", severity_badge(event.threat_level)),
+            "description": event.narrative,
+            "color": discord_color(event.threat_level),
+            "fields": [
+                { "name": "Event", "value": details.event_type, "inline": true },
+                { "name": "Process", "value": details.process, "inline": true },
+                { "name": "PID", "value": details.pid, "inline": true },
+                { "name": "Path", "value": details.path, "inline": false },
+                { "name": "MITRE ID", "value": details.mitre_id, "inline": true }
+            ],
+            "footer": { "text": "Leash • AI Agent Visibility" },
+            "timestamp": event.timestamp.to_rfc3339()
+        }]
+    })
+}
+
+fn build_telegram_payload(event: &SecurityEvent, chat_id: &str) -> serde_json::Value {
+    let details = event_details(event);
+    let text = format!(
+        "<b>{} Leash Alert ({})</b>\n{}\n\n<b>Event:</b> <code>{}</code>\n<b>Process:</b> <code>{}</code>\n<b>PID:</b> <code>{}</code>\n<b>Path:</b> <code>{}</code>\n<b>MITRE ID:</b> <code>{}</code>\n<b>Timestamp:</b> <code>{}</code>",
+        severity_badge(event.threat_level),
+        level_label(event.threat_level),
+        escape_html(&event.narrative),
+        escape_html(&details.event_type),
+        escape_html(&details.process),
+        escape_html(&details.pid),
+        escape_html(&details.path),
+        escape_html(&details.mitre_id),
+        escape_html(&event.timestamp.to_rfc3339())
+    );
+
+    json!({
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": true
+    })
+}
+
 fn parse_level(raw: &str) -> ThreatLevel {
     match raw.to_ascii_lowercase().as_str() {
         "yellow" => ThreatLevel::Yellow,
@@ -319,4 +330,57 @@ fn escape_html(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{EventType, ProcessInfo, SecurityEvent, ThreatLevel};
+
+    fn sample_event() -> SecurityEvent {
+        let mut event = SecurityEvent::new(
+            EventType::CredentialAccess,
+            ThreatLevel::Red,
+            "credential access detected".to_string(),
+        );
+        event.process = Some(ProcessInfo {
+            pid: 4242,
+            ppid: 1111,
+            name: "codex".to_string(),
+            cmdline: "codex run".to_string(),
+            exe: "/usr/local/bin/codex".to_string(),
+            cwd: "/tmp".to_string(),
+            username: "user".to_string(),
+            open_files: Vec::new(),
+            parent_chain: Vec::new(),
+        });
+        event
+    }
+
+    #[test]
+    fn slack_payload_is_valid_json() {
+        let payload = build_slack_payload(&sample_event());
+        let serialized = serde_json::to_string(&payload).expect("serialize slack payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("parse slack payload json");
+        assert!(parsed.get("text").is_some());
+    }
+
+    #[test]
+    fn discord_payload_is_valid_json() {
+        let payload = build_discord_payload(&sample_event());
+        let serialized = serde_json::to_string(&payload).expect("serialize discord payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("parse discord payload json");
+        assert!(parsed.get("embeds").is_some());
+    }
+
+    #[test]
+    fn telegram_payload_is_valid_json() {
+        let payload = build_telegram_payload(&sample_event(), "123456");
+        let serialized = serde_json::to_string(&payload).expect("serialize telegram payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("parse telegram payload json");
+        assert_eq!(parsed["chat_id"], "123456");
+    }
 }

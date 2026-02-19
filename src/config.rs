@@ -312,3 +312,21 @@ pub fn expand_tilde(input: &str) -> String {
     }
     input.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn default_config_yaml_parses() {
+        let parsed: Config = serde_yaml::from_str(include_str!("../config/default.yaml"))
+            .expect("default.yaml should parse");
+        assert_eq!(parsed.alerts.min_level, "yellow");
+        assert!(
+            parsed
+                .ai_agents
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case("codex"))
+        );
+    }
+}

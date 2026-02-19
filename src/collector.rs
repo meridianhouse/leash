@@ -597,3 +597,36 @@ fn parse_ipv4_octets(host: &str) -> Option<(u8, u8, u8, u8)> {
     }
     Some((a, b, c, d))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessCollector;
+    use crate::config::Config;
+    use crate::models::SecurityEvent;
+    use tokio::sync::broadcast;
+
+    fn collector() -> ProcessCollector {
+        let cfg = Config::default();
+        let (tx, _) = broadcast::channel::<SecurityEvent>(4);
+        ProcessCollector::new(cfg, tx)
+    }
+
+    #[test]
+    fn ai_agent_name_matching_detects_common_agents() {
+        let collector = collector();
+        assert!(collector.is_ai_agent("claude", "claude chat", "/usr/bin/claude"));
+        assert!(collector.is_ai_agent("codex", "codex run", "/usr/bin/codex"));
+        assert!(collector.is_ai_agent("cursor", "cursor", "/opt/cursor"));
+        assert!(collector.is_ai_agent(
+            "node",
+            "node /opt/claude-code/index.js",
+            "/usr/bin/node"
+        ));
+    }
+
+    #[test]
+    fn ai_agent_name_matching_excludes_unrelated_processes() {
+        let collector = collector();
+        assert!(!collector.is_ai_agent("sshd", "sshd: ryan", "/usr/sbin/sshd"));
+    }
+}

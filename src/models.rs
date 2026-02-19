@@ -133,3 +133,15 @@ impl SecurityEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ThreatLevel;
+
+    #[test]
+    fn threat_level_ordering() {
+        assert!(ThreatLevel::Green < ThreatLevel::Yellow);
+        assert!(ThreatLevel::Yellow < ThreatLevel::Orange);
+        assert!(ThreatLevel::Orange < ThreatLevel::Red);
+    }
+}

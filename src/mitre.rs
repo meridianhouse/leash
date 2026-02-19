@@ -198,3 +198,40 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         name: name.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{EventType, SecurityEvent, ThreatLevel};
+
+    fn has_technique(event: &SecurityEvent, technique_id: &str) -> bool {
+        event
+            .mitre
+            .iter()
+            .any(|mapping| mapping.technique_id == technique_id)
+    }
+
+    #[test]
+    fn event_type_to_mitre_mapping_is_correct() {
+        let shell = infer_and_tag(SecurityEvent::new(
+            EventType::ProcessShellSpawn,
+            ThreatLevel::Yellow,
+            "shell".into(),
+        ));
+        assert!(has_technique(&shell, "T1059.004"));
+
+        let cred = infer_and_tag(SecurityEvent::new(
+            EventType::CredentialAccess,
+            ThreatLevel::Red,
+            "credential".into(),
+        ));
+        assert!(has_technique(&cred, "T1552.001"));
+
+        let network = infer_and_tag(SecurityEvent::new(
+            EventType::NetworkSuspicious,
+            ThreatLevel::Orange,
+            "network".into(),
+        ));
+        assert!(has_technique(&network, "T1071.001"));
+    }
+}
