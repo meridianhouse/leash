@@ -168,3 +168,6 @@ egress:
     - transfer.sh
     - file.io
   suspicious_country_ip_prefixes: []
+
+auth:
+  stop_password_hash: ""

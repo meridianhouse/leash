@@ -59,4 +59,15 @@ pub enum Commands {
     },
     #[command(about = "Stop Leash daemon")]
     Stop,
+    #[command(about = "Authentication helper commands")]
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    #[command(about = "Read a password from stdin and print its blake3 hash")]
+    SetPassword,
 }

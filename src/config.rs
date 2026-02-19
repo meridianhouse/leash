@@ -30,6 +30,8 @@ pub struct Config {
     pub alerts: AlertsConfig,
     #[serde(default)]
     pub egress: EgressConfig,
+    #[serde(default)]
+    pub auth: Auth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -128,6 +130,12 @@ pub struct EgressConfig {
     pub suspicious_country_ip_prefixes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Auth {
+    #[serde(default)]
+    pub stop_password_hash: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -149,6 +157,7 @@ impl Default for Config {
             response: ResponseConfig::default(),
             alerts: AlertsConfig::default(),
             egress: EgressConfig::default(),
+            auth: Auth::default(),
         }
     }
 }
@@ -687,6 +696,8 @@ egress:
   tor_ports: [9050, 9051]
   exfil_domains: [pastebin, file.io]
   suspicious_country_ip_prefixes: [203.0.113.]
+auth:
+  stop_password_hash: 9f86d081884c7d659a2feaa0c55ad015
 "#;
 
         let parsed: Config = serde_yaml::from_str(yaml).expect("all-fields config should parse");
@@ -704,6 +715,10 @@ egress:
         assert_eq!(
             parsed.egress.suspicious_country_ip_prefixes,
             vec!["203.0.113."]
+        );
+        assert_eq!(
+            parsed.auth.stop_password_hash,
+            "9f86d081884c7d659a2feaa0c55ad015"
         );
     }
 

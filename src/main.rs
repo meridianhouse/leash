@@ -21,7 +21,7 @@ mod test_events;
 mod watchdog;
 
 use crate::app::{init_config, init_tracing, print_status, run_agent, run_test_alerts, stop_agent};
-use crate::cli::{Cli, Commands};
+use crate::cli::{AuthCommand, Cli, Commands};
 use crate::config::Config;
 use crate::ebpf::{EbpfMonitor, attach_kernel_monitor};
 use crate::models::{EventType, SecurityEvent, ThreatLevel};
@@ -81,7 +81,16 @@ async fn main() -> Result<(), app::DynError> {
             let export_format = export::ExportFormat::parse(&format)?;
             export::export_events(export_format, last.as_deref(), severity.as_deref())?;
         }
-        Commands::Stop => stop_agent(cli.json)?,
+        Commands::Stop => stop_agent(cli.config.as_deref(), cli.json)?,
+        Commands::Auth { command } => match command {
+            AuthCommand::SetPassword => {
+                let mut password = String::new();
+                std::io::stdin().read_line(&mut password)?;
+                let trimmed = password.trim_end_matches(['\r', '\n']);
+                let hash = blake3::hash(trimmed.as_bytes());
+                println!("{}", hash.to_hex());
+            }
+        },
     }
 
     Ok(())

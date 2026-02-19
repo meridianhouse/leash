@@ -5,7 +5,9 @@ use crate::display::render_watch_ui;
 use crate::egress::EgressMonitor;
 use crate::fim::FileIntegrityMonitor;
 use crate::history;
+use crate::mitre;
 use crate::models::SecurityEvent;
+use crate::models::{EventType, ThreatLevel};
 use crate::response::ResponseEngine;
 use crate::stats;
 use crate::test_events::build_test_events;
@@ -26,6 +28,9 @@ use tracing::{debug, error, info, warn};
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static AUTH_STOP_ENABLED: AtomicBool = AtomicBool::new(false);
+static AUTH_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static UNAUTHORIZED_SIGTERM: AtomicBool = AtomicBool::new(false);
 
 pub fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -42,6 +47,11 @@ pub async fn run_agent(
     json_output: bool,
     dry_run: bool,
 ) -> Result<(), DynError> {
+    AUTH_STOP_ENABLED.store(!cfg.auth.stop_password_hash.trim().is_empty(), Ordering::SeqCst);
+    AUTH_STOP_REQUESTED.store(false, Ordering::SeqCst);
+    SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
+    UNAUTHORIZED_SIGTERM.store(false, Ordering::SeqCst);
+
     ensure_single_instance()?;
     write_pid_file()?;
 
@@ -81,7 +91,7 @@ pub async fn run_agent(
     let watchdog_handle = tokio::spawn(async move { watchdog.run().await });
 
     info!("Leash is running. Press Ctrl-C to stop.");
-    wait_for_shutdown_signal().await?;
+    wait_for_shutdown_signal(&event_tx).await?;
     info!("Shutdown requested.");
 
     collector_handle.abort();
@@ -100,11 +110,25 @@ pub async fn run_agent(
     Ok(())
 }
 
-async fn wait_for_shutdown_signal() -> Result<(), DynError> {
+async fn wait_for_shutdown_signal(event_tx: &broadcast::Sender<SecurityEvent>) -> Result<(), DynError> {
     #[cfg(unix)]
     {
         install_signal_handlers()?;
         loop {
+            if UNAUTHORIZED_SIGTERM.swap(false, Ordering::SeqCst) {
+                let event = mitre::infer_and_tag(SecurityEvent::new(
+                    EventType::SelfTamper,
+                    ThreatLevel::Red,
+                    "Unauthorized SIGTERM received while stop password is enabled".to_string(),
+                ));
+                if let Err(err) = event_tx.send(event) {
+                    stats::record_dropped_event();
+                    warn!(
+                        event_type = %err.0.event_type,
+                        "dropping event: broadcast channel full or closed"
+                    );
+                }
+            }
             if SHUTDOWN_REQUESTED.swap(false, Ordering::SeqCst) {
                 break;
             }
@@ -121,14 +145,30 @@ async fn wait_for_shutdown_signal() -> Result<(), DynError> {
 }
 
 #[cfg(unix)]
-extern "C" fn shutdown_signal_handler(_: i32) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+extern "C" fn leash_signal_handler(sig: i32) {
+    match sig {
+        libc::SIGUSR1 => {
+            AUTH_STOP_REQUESTED.store(true, Ordering::SeqCst);
+        }
+        libc::SIGTERM => {
+            if AUTH_STOP_ENABLED.load(Ordering::SeqCst)
+                && !AUTH_STOP_REQUESTED.swap(false, Ordering::SeqCst)
+            {
+                UNAUTHORIZED_SIGTERM.store(true, Ordering::SeqCst);
+                return;
+            }
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        }
+        _ => {
+            SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 #[cfg(unix)]
 fn install_signal_handlers() -> Result<(), DynError> {
     let action = signal::SigAction::new(
-        signal::SigHandler::Handler(shutdown_signal_handler),
+        signal::SigHandler::Handler(leash_signal_handler),
         signal::SaFlags::SA_RESTART,
         signal::SigSet::empty(),
     );
@@ -137,6 +177,7 @@ fn install_signal_handlers() -> Result<(), DynError> {
     unsafe {
         signal::sigaction(Signal::SIGINT, &action)?;
         signal::sigaction(Signal::SIGTERM, &action)?;
+        signal::sigaction(Signal::SIGUSR1, &action)?;
     }
 
     Ok(())
@@ -233,7 +274,8 @@ pub fn print_status(json_output: bool) -> Result<(), DynError> {
     Ok(())
 }
 
-pub fn stop_agent(json_output: bool) -> Result<(), DynError> {
+pub fn stop_agent(config_path: Option<&Path>, json_output: bool) -> Result<(), DynError> {
+    let cfg = Config::load(config_path)?;
     let pid_file = pid_file_path()?;
     let pid = read_pid_from_file(&pid_file)?
         .map(|record| record.pid)
@@ -243,6 +285,20 @@ pub fn stop_agent(json_output: bool) -> Result<(), DynError> {
                 pid_file.display()
             )
         })?;
+
+    if !cfg.auth.stop_password_hash.trim().is_empty() {
+        let mut password = String::new();
+        std::io::stdin().read_line(&mut password)?;
+        let trimmed = password.trim_end_matches(['\r', '\n']);
+        let computed_hash = blake3::hash(trimmed.as_bytes()).to_hex().to_string();
+        if computed_hash != cfg.auth.stop_password_hash.trim() {
+            eprintln!("Stop password mismatch");
+            return Err("invalid stop password".into());
+        }
+        signal::kill(Pid::from_raw(pid), Signal::SIGUSR1)?;
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
     signal::kill(Pid::from_raw(pid), Signal::SIGTERM)?;
     cleanup_pid_file();
 
