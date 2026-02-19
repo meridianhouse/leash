@@ -524,6 +524,10 @@ fn missing_explicit_config_path_falls_back_to_defaults() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(stderr.contains("config file not found"));
+    assert!(stderr.contains("does-not-exist.yaml"));
+    assert!(stderr.contains("leash init"));
 }
 
 #[test]

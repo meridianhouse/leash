@@ -218,6 +218,10 @@ impl Config {
             .unwrap_or_else(default_config_path);
 
         if !config_path.exists() {
+            eprintln!(
+                "Warning: config file not found at {}. Run `leash init` to create a starter config.",
+                config_path.display()
+            );
             return Ok(Self::default());
         }
 
@@ -253,11 +257,14 @@ impl Config {
         if self.alerts.slack.enabled {
             if self.alerts.slack.url.trim().is_empty() {
                 warnings.push(
-                    "alerts.slack.enabled is true but alerts.slack.url is empty. Slack webhook URL should start with https://hooks.slack.com/services/.".to_string(),
+                    "alerts.slack.enabled is true but alerts.slack.url is empty. Slack webhook URL should match https://hooks.slack.com/services/<team>/<channel>/<token>.".to_string(),
                 );
             } else if !is_valid_https_url(&self.alerts.slack.url) {
                 warnings.push(
-                    "alerts.slack.url is not a valid HTTPS URL. Slack webhook URL should start with https://hooks.slack.com/services/.".to_string(),
+                    format!(
+                        "alerts.slack.url is not a valid HTTPS URL: '{}'. Slack webhook URL should match https://hooks.slack.com/services/<team>/<channel>/<token>.",
+                        self.alerts.slack.url.trim()
+                    ),
                 );
             } else if !self
                 .alerts
@@ -267,7 +274,10 @@ impl Config {
                 .starts_with("https://hooks.slack.com/")
             {
                 warnings.push(
-                    "alerts.slack.url does not look like a Slack webhook. Slack webhook URL should start with https://hooks.slack.com/services/.".to_string(),
+                    format!(
+                        "alerts.slack.url does not look like a Slack webhook: '{}'. Slack webhook URL should match https://hooks.slack.com/services/<team>/<channel>/<token>.",
+                        self.alerts.slack.url.trim()
+                    ),
                 );
             }
         }
@@ -275,11 +285,14 @@ impl Config {
         if self.alerts.discord.enabled {
             if self.alerts.discord.url.trim().is_empty() {
                 warnings.push(
-                    "alerts.discord.enabled is true but alerts.discord.url is empty. Discord webhook URL should start with https://discord.com/api/webhooks/.".to_string(),
+                    "alerts.discord.enabled is true but alerts.discord.url is empty. Discord webhook URL should match https://discord.com/api/webhooks/<id>/<token>.".to_string(),
                 );
             } else if !is_valid_https_url(&self.alerts.discord.url) {
                 warnings.push(
-                    "alerts.discord.url is not a valid HTTPS URL. Discord webhook URL should start with https://discord.com/api/webhooks/.".to_string(),
+                    format!(
+                        "alerts.discord.url is not a valid HTTPS URL: '{}'. Discord webhook URL should match https://discord.com/api/webhooks/<id>/<token>.",
+                        self.alerts.discord.url.trim()
+                    ),
                 );
             } else if !self
                 .alerts
@@ -295,7 +308,10 @@ impl Config {
                     .starts_with("https://discordapp.com/api/webhooks/")
             {
                 warnings.push(
-                    "alerts.discord.url does not look like a Discord webhook. Discord webhook URL should start with https://discord.com/api/webhooks/.".to_string(),
+                    format!(
+                        "alerts.discord.url does not look like a Discord webhook: '{}'. Discord webhook URL should match https://discord.com/api/webhooks/<id>/<token>.",
+                        self.alerts.discord.url.trim()
+                    ),
                 );
             }
         }
@@ -647,5 +663,28 @@ egress:
         assert!(!is_valid_home_path(Path::new("/etc")));
         assert!(!is_valid_home_path(Path::new("/tmp")));
         assert!(is_valid_home_path(Path::new("/home/ryan")));
+    }
+
+    #[test]
+    fn webhook_warnings_include_invalid_urls() {
+        let mut cfg = Config::default();
+        cfg.alerts.slack.enabled = true;
+        cfg.alerts.slack.url = "http://bad.example/slack".into();
+        cfg.alerts.discord.enabled = true;
+        cfg.alerts.discord.url = "not-a-url".into();
+
+        let warnings = cfg.startup_warnings();
+        assert!(warnings.iter().any(|w| w.contains("http://bad.example/slack")));
+        assert!(warnings.iter().any(|w| w.contains("not-a-url")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("https://hooks.slack.com/services/<team>/<channel>/<token>"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("https://discord.com/api/webhooks/<id>/<token>"))
+        );
     }
 }

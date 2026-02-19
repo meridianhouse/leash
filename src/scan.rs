@@ -214,7 +214,10 @@ fn collect_process_table() -> HashMap<i32, ProcessEntry> {
     let all = match procfs::process::all_processes() {
         Ok(all) => all,
         Err(err) => {
-            warn!(?err, "unable to enumerate processes for scan");
+            warn!(
+                ?err,
+                "unable to enumerate processes for scan; ensure Leash has permission to read /proc (try running with elevated privileges or grant procfs access)"
+            );
             return table;
         }
     };
@@ -340,7 +343,10 @@ fn collect_network_connections(
     let lines = match fs::read_to_string("/proc/net/tcp") {
         Ok(lines) => lines,
         Err(err) => {
-            warn!(?err, "cannot read /proc/net/tcp during scan");
+            warn!(
+                ?err,
+                "cannot read /proc/net/tcp during scan; ensure Leash has permission to read /proc/net (try running with elevated privileges or grant procfs access)"
+            );
             return connections;
         }
     };

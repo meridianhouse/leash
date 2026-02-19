@@ -1,5 +1,5 @@
 use crate::models::{SecurityEvent, ThreatLevel};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, ErrorCode, params};
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -87,7 +87,7 @@ fn open_db_at(path: &Path) -> anyhow::Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let conn = Connection::open(path)?;
+    let conn = Connection::open(path).map_err(|err| sqlite_err_with_hint(err, path, "open"))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,7 +99,8 @@ fn open_db_at(path: &Path) -> anyhow::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);",
-    )?;
+    )
+    .map_err(|err| sqlite_err_with_hint(err, path, "initialize schema"))?;
 
     Ok(conn)
 }
@@ -115,6 +116,9 @@ pub fn store_event(event: &SecurityEvent) -> anyhow::Result<()> {
 }
 
 fn insert_event(conn: &Connection, event: &SecurityEvent) -> anyhow::Result<()> {
+    let db_file = db_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
     conn.execute(
         "INSERT INTO events (timestamp, severity, event_type, narrative, payload_json)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -125,7 +129,8 @@ fn insert_event(conn: &Connection, event: &SecurityEvent) -> anyhow::Result<()> 
             event.narrative,
             serde_json::to_string(event)?,
         ],
-    )?;
+    )
+    .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "insert event"))?;
     Ok(())
 }
 
@@ -197,7 +202,12 @@ fn query_stored_events(
         query.push_str(&format!(" LIMIT {value}"));
     }
 
-    let mut stmt = conn.prepare(&query)?;
+    let db_file = db_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    let mut stmt = conn
+        .prepare(&query)
+        .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "prepare query"))?;
     let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |row| {
         Ok(StoredEvent {
             timestamp: row.get(0)?,
@@ -206,7 +216,8 @@ fn query_stored_events(
             narrative: row.get(3)?,
             payload_json: row.get(4)?,
         })
-    })?;
+    })
+    .map_err(|err| sqlite_err_with_hint_str(err, &db_file, "run query"))?;
 
     let mut records = Vec::new();
     for item in rows {
@@ -249,6 +260,44 @@ fn threat_level_as_str(level: ThreatLevel) -> &'static str {
         ThreatLevel::Orange => "orange",
         ThreatLevel::Red => "red",
         ThreatLevel::Nuclear => "nuclear",
+    }
+}
+
+fn sqlite_err_with_hint(err: rusqlite::Error, path: &Path, operation: &str) -> anyhow::Error {
+    if is_sqlite_locked(&err) {
+        return anyhow::anyhow!(
+            "SQLite DB is locked at {} while trying to {}. Check for other running Leash instances that may be using the same database.",
+            path.display(),
+            operation
+        );
+    }
+    err.into()
+}
+
+fn sqlite_err_with_hint_str(
+    err: rusqlite::Error,
+    db_file: &str,
+    operation: &str,
+) -> anyhow::Error {
+    if is_sqlite_locked(&err) {
+        return anyhow::anyhow!(
+            "SQLite DB is locked at {} while trying to {}. Check for other running Leash instances that may be using the same database.",
+            db_file,
+            operation
+        );
+    }
+    err.into()
+}
+
+fn is_sqlite_locked(err: &rusqlite::Error) -> bool {
+    match err {
+        rusqlite::Error::SqliteFailure(inner, _) => {
+            inner.code == ErrorCode::DatabaseBusy
+                || inner.code == ErrorCode::DatabaseLocked
+                || inner.extended_code == ErrorCode::DatabaseBusy as i32
+                || inner.extended_code == ErrorCode::DatabaseLocked as i32
+        }
+        _ => false,
     }
 }
 
@@ -362,5 +411,17 @@ mod tests {
         assert_eq!(rows[0].narrative, "yellow event");
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn sqlite_locked_error_includes_instance_hint() {
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(ErrorCode::DatabaseLocked as i32),
+            None,
+        );
+        let msg = sqlite_err_with_hint_str(locked, "/tmp/leash.db", "insert event").to_string();
+        assert!(msg.contains("SQLite DB is locked"));
+        assert!(msg.contains("/tmp/leash.db"));
+        assert!(msg.contains("other running Leash instances"));
     }
 }

@@ -48,7 +48,10 @@ impl ProcessCollector {
         let all = match procfs::process::all_processes() {
             Ok(p) => p,
             Err(err) => {
-                warn!(?err, "unable to enumerate /proc");
+                warn!(
+                    ?err,
+                    "unable to enumerate /proc; ensure Leash has permission to read /proc (try running with elevated privileges or grant procfs access)"
+                );
                 return;
             }
         };
