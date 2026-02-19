@@ -45,3 +45,4 @@ notify.workspace = true
 blake3.workspace = true
 nix.workspace = true
 nu-ansi-term = "0.50.3"
+anyhow = { path = "third_party/anyhow" }

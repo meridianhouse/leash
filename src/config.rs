@@ -1,3 +1,4 @@
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -160,7 +161,7 @@ impl Default for EgressConfig {
 }
 
 impl Config {
-    pub fn load(path: Option<&Path>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn load(path: Option<&Path>) -> Result<Self> {
         let config_path = path
             .map(Path::to_path_buf)
             .unwrap_or_else(default_config_path);
@@ -169,8 +170,11 @@ impl Config {
             return Ok(Self::default());
         }
 
-        let raw = fs::read_to_string(&config_path)?;
-        let mut cfg: Self = serde_yaml::from_str(&raw)?;
+        let raw = fs::read_to_string(&config_path).with_context(|| {
+            format!("failed to read config file: {}", config_path.display())
+        })?;
+        let mut cfg: Self = serde_yaml::from_str(&raw)
+            .with_context(|| format!("invalid YAML in config file {}", config_path.display()))?;
 
         cfg.alerts.json_log.path = expand_tilde(&cfg.alerts.json_log.path);
         cfg.fim_paths = cfg
@@ -178,7 +182,16 @@ impl Config {
             .into_iter()
             .map(|p| expand_tilde(&p))
             .collect();
+        cfg.validate()
+            .with_context(|| format!("invalid values in config file {}", config_path.display()))?;
+
         Ok(cfg)
+    }
+
+    fn validate(&self) -> Result<()> {
+        validate_level(&self.alerts.min_severity, "alerts.min_severity")?;
+        validate_level(&self.response.stop_min_level, "response.stop_min_level")?;
+        Ok(())
     }
 }
 
@@ -289,6 +302,15 @@ pub fn expand_tilde(input: &str) -> String {
         return format!("{home}/{rest}");
     }
     input.to_string()
+}
+
+fn validate_level(raw: &str, field_name: &str) -> Result<()> {
+    match raw.to_ascii_lowercase().as_str() {
+        "green" | "yellow" | "orange" | "red" | "nuclear" => Ok(()),
+        _ => bail!(
+            "{field_name} must be one of: green, yellow, orange, red, nuclear (got '{raw}')"
+        ),
+    }
 }
 
 #[cfg(test)]
