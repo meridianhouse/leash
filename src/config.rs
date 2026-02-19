@@ -175,6 +175,20 @@ impl Default for EgressConfig {
 }
 
 impl Config {
+    /// Parses a [`Config`] from YAML content and applies normalization/validation.
+    pub fn from_yaml_str(raw: &str) -> Result<Self> {
+        let mut cfg: Self = serde_yaml::from_str(raw).context("invalid YAML")?;
+
+        cfg.alerts.json_log.path = expand_tilde(&cfg.alerts.json_log.path);
+        cfg.fim_paths = cfg
+            .fim_paths
+            .into_iter()
+            .map(|p| expand_tilde(&p))
+            .collect();
+        cfg.validate().context("invalid config values")?;
+        Ok(cfg)
+    }
+
     pub fn load(path: Option<&Path>) -> Result<Self> {
         let config_path = path
             .map(Path::to_path_buf)
@@ -186,17 +200,8 @@ impl Config {
 
         let raw = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config file: {}", config_path.display()))?;
-        let mut cfg: Self = serde_yaml::from_str(&raw)
+        let cfg = Self::from_yaml_str(&raw)
             .with_context(|| format!("invalid YAML in config file {}", config_path.display()))?;
-
-        cfg.alerts.json_log.path = expand_tilde(&cfg.alerts.json_log.path);
-        cfg.fim_paths = cfg
-            .fim_paths
-            .into_iter()
-            .map(|p| expand_tilde(&p))
-            .collect();
-        cfg.validate()
-            .with_context(|| format!("invalid values in config file {}", config_path.display()))?;
         cfg.print_startup_warnings();
 
         Ok(cfg)

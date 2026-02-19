@@ -1,0 +1,40 @@
+[package]
+name = "leash-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+leash = { path = ".." }
+
+[[bin]]
+name = "scrub_secrets"
+path = "fuzz_targets/scrub_secrets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "escape_html"
+path = "fuzz_targets/escape_html.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_parsing"
+path = "fuzz_targets/config_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mitre_mapping"
+path = "fuzz_targets/mitre_mapping.rs"
+test = false
+doc = false
+bench = false
