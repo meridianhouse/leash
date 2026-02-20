@@ -3,6 +3,9 @@ use crate::collector::ProcessCollector;
 use crate::config::Config;
 use crate::datasets::DatasetManager;
 use crate::display::render_watch_ui;
+use crate::ebpf::{
+    KernelEventSource, proc_connector_poll_interval_override_ms, spawn_kernel_monitor,
+};
 use crate::egress::EgressMonitor;
 use crate::fim::FileIntegrityMonitor;
 use crate::history;
@@ -46,6 +49,7 @@ pub async fn run_agent(
     watch_mode: bool,
     json_output: bool,
     dry_run: bool,
+    enable_ebpf: bool,
 ) -> Result<(), DynError> {
     ensure_single_instance()?;
     write_pid_file()?;
@@ -55,7 +59,22 @@ pub async fn run_agent(
     }
 
     let (event_tx, _) = broadcast::channel::<SecurityEvent>(8_192);
-    let collector = ProcessCollector::new(cfg.clone(), event_tx.clone());
+    let mut kernel_monitor = spawn_kernel_monitor(event_tx.clone(), enable_ebpf);
+    let collector_interval_ms = if kernel_monitor.source == KernelEventSource::ProcConnector {
+        proc_connector_poll_interval_override_ms(cfg.monitor_interval_ms)
+    } else {
+        cfg.monitor_interval_ms
+    };
+    if collector_interval_ms != cfg.monitor_interval_ms {
+        info!(
+            original_ms = cfg.monitor_interval_ms,
+            overridden_ms = collector_interval_ms,
+            "proc connector active; reducing /proc process polling frequency"
+        );
+    }
+    let mut collector_cfg = cfg.clone();
+    collector_cfg.monitor_interval_ms = collector_interval_ms;
+    let collector = ProcessCollector::new(collector_cfg, event_tx.clone());
     let egress = EgressMonitor::new(cfg.clone(), event_tx.clone());
     let fim = FileIntegrityMonitor::new(cfg.clone(), event_tx.clone())?;
     let alerts = AlertDispatcher::new(cfg.clone(), event_tx.subscribe(), dry_run)?;
@@ -95,6 +114,7 @@ pub async fn run_agent(
     alerts_handle.abort();
     response_handle.abort();
     watchdog_handle.abort();
+    kernel_monitor.shutdown();
     history_handle.abort();
     stats_handle.abort();
     if let Some(handle) = watch_handle {

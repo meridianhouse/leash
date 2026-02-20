@@ -27,44 +27,23 @@ use crate::app::{
 };
 use crate::cli::{AuthCommand, Cli, Commands};
 use crate::config::Config;
-use crate::ebpf::{EbpfMonitor, attach_kernel_monitor};
-use crate::models::{EventType, SecurityEvent, ThreatLevel};
 use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<(), app::DynError> {
     init_tracing();
     let cli = Cli::parse();
-    if cli.ebpf {
-        let mut monitor = EbpfMonitor;
-        if let Err(err) = attach_kernel_monitor(&mut monitor) {
-            eprintln!("{err}");
-        }
-        if let Err(err) = ebpf::KernelMonitor::on_event(
-            &mut monitor,
-            &SecurityEvent::new(
-                EventType::ProcessNew,
-                ThreatLevel::Green,
-                "eBPF smoke event".to_string(),
-            ),
-        ) {
-            eprintln!("{err}");
-        }
-        if let Err(err) = ebpf::KernelMonitor::detach(&mut monitor) {
-            eprintln!("{err}");
-        }
-    }
 
     match cli.command {
         Commands::Init => init_config(cli.json).await?,
         Commands::Update => update_datasets(cli.config.as_deref(), cli.json).await?,
         Commands::Start => {
             let cfg = Config::load(cli.config.as_deref())?;
-            run_agent(cfg, false, cli.json, cli.dry_run).await?;
+            run_agent(cfg, false, cli.json, cli.dry_run, cli.ebpf).await?;
         }
         Commands::Watch => {
             let cfg = Config::load(cli.config.as_deref())?;
-            run_agent(cfg, true, cli.json, cli.dry_run).await?;
+            run_agent(cfg, true, cli.json, cli.dry_run, cli.ebpf).await?;
         }
         Commands::Test => {
             let cfg = Config::load(cli.config.as_deref())?;

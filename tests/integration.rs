@@ -1,5 +1,6 @@
 use leash::alerts::AlertDispatcher;
 use leash::config::Config;
+use leash::ebpf::{KernelEventSource, KernelMonitorOptions, spawn_kernel_monitor_with_options};
 use leash::models::{EventType, ProcessInfo, SecurityEvent, ThreatLevel};
 use serde_json::Value;
 use std::fs;
@@ -278,6 +279,23 @@ fn alert_event(event_type: EventType, pid: i32, level: ThreatLevel) -> SecurityE
         start_time: Some(chrono::Utc::now()),
     });
     event
+}
+
+#[test]
+fn kernel_monitor_fallback_is_graceful_when_netlink_unavailable() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        let (tx, _) = tokio::sync::broadcast::channel::<SecurityEvent>(8);
+        let monitor = spawn_kernel_monitor_with_options(
+            tx,
+            true,
+            KernelMonitorOptions {
+                ebpf_object_path: Some(std::path::PathBuf::from("/definitely/missing-ebpf.o")),
+                proc_connector_protocol: -1,
+            },
+        );
+        assert_eq!(monitor.source, KernelEventSource::None);
+    });
 }
 
 #[test]

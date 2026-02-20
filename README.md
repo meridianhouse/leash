@@ -144,18 +144,18 @@ alerts:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│              Leash Daemon               │
-├──────────┬──────────┬──────────┬────────┤
-│ Process  │   FIM    │ Network  │ Watch- │
-│ Collector│ Monitor  │ Egress   │ dog    │
-├──────────┴──────────┴──────────┴────────┤
-│            Event Bus (broadcast)         │
-├──────────┬──────────┬───────────────────┤
-│  MITRE   │ Response │    Alert          │
-│  Mapper  │ Engine   │    Dispatcher     │
-│          │(opt-in)  │ Slack/Discord/TG  │
-└──────────┴──────────┴───────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                      Leash Daemon                       │
+├────────────────┬──────────┬──────────┬──────────┬──────┤
+│ Kernel Monitor │ Process  │   FIM    │ Network  │Watch-│
+│ eBPF / CN_PROC │ Collector│ Monitor  │ Egress   │dog   │
+├────────────────┴──────────┴──────────┴──────────┴──────┤
+│                  Event Bus (broadcast)                  │
+├──────────┬──────────┬───────────────────────────────────┤
+│  MITRE   │ Response │    Alert Dispatcher               │
+│  Mapper  │ Engine   │    Slack/Discord/Telegram/JSON    │
+│          │(opt-in)  │                                   │
+└──────────┴──────────┴───────────────────────────────────┘
 ```
 
 Leash uses an async event bus architecture built on Tokio. Each subsystem runs as an independent task, communicating through a broadcast channel. This means:
@@ -168,7 +168,7 @@ Leash uses an async event bus architecture built on Tokio. Each subsystem runs a
 
 **v0.1 (current):** Polls `/proc` filesystem for process and network data. Uses the `notify` crate for real-time file system events with `blake3` integrity hashing.
 
-**v0.2 (planned):** eBPF-based kernel hooks via the `aya` crate for zero-overhead, event-driven monitoring. Inspired by [Tetragon](https://github.com/cilium/tetragon).
+**v0.2:** Event-driven kernel monitoring is enabled. `--ebpf` attempts tracepoint-based eBPF hooks through `aya` first and falls back to Linux proc connector (`CN_PROC`) if unavailable. `/proc` polling remains for supplemental enrichment and egress correlation.
 
 ## MITRE ATT&CK Coverage
 
@@ -223,7 +223,7 @@ Requirements: Rust 1.75+, Linux (x86_64 or aarch64)
 ## Roadmap
 
 - [x] v0.1 — Core visibility (process, file, network monitoring)
-- [ ] v0.2 — eBPF kernel hooks (zero-overhead monitoring)
+- [x] v0.2 — eBPF kernel hooks with proc connector fallback (event-driven monitoring)
 - [ ] v0.2 — LOLRMM integration (flag known abused RMM tools via [lolrmm.io](https://lolrmm.io) dataset)
 - [ ] v0.2 — LOLDrivers integration (detect vulnerable/malicious drivers via [loldrivers.io](https://www.loldrivers.io) dataset)
 - [x] v0.2 — GTFOBins integration (flag risky Unix binary abuse capabilities via [gtfobins.github.io](https://gtfobins.github.io))

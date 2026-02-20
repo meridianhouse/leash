@@ -60,9 +60,15 @@ impl ProcessCollector {
 
     /// Starts continuous process collection and emits events on each polling interval.
     pub async fn run(mut self) {
+        let interval = self.cfg.monitor_interval_ms;
+        self.run_with_interval(interval).await;
+    }
+
+    /// Starts continuous process collection at a custom interval.
+    pub async fn run_with_interval(mut self, interval_ms: u64) {
         loop {
             self.collect_once();
-            sleep(jittered_scan_interval(self.cfg.monitor_interval_ms)).await;
+            sleep(jittered_scan_interval(interval_ms)).await;
         }
     }
 
