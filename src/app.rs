@@ -466,15 +466,17 @@ pub async fn init_config(json_output: bool) -> Result<(), DynError> {
             "datasets_refreshed": refreshed,
             "rmm_tools_loaded": datasets.rmm_tool_count(),
             "driver_hashes_loaded": datasets.driver_hash_count(),
+            "gtfobins_loaded": datasets.gtfobin_count(),
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("Initialized Leash config at {}", target.display());
         println!(
-            "Loaded {} RMM tools, {} driver hashes",
+            "Loaded {} RMM tools, {} driver hashes, {} GTFOBins",
             datasets.rmm_tool_count(),
-            datasets.driver_hash_count()
+            datasets.driver_hash_count(),
+            datasets.gtfobin_count()
         );
     }
 
@@ -507,15 +509,17 @@ pub async fn update_datasets(config_path: Option<&Path>, json_output: bool) -> R
             "updated": true,
             "rmm_tools_loaded": datasets.rmm_tool_count(),
             "driver_hashes_loaded": datasets.driver_hash_count(),
+            "gtfobins_loaded": datasets.gtfobin_count(),
             "cache_dir": cache_dir,
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!(
-            "Datasets updated: loaded {} RMM tools, {} driver hashes",
+            "Datasets updated: loaded {} RMM tools, {} driver hashes, {} GTFOBins",
             datasets.rmm_tool_count(),
-            datasets.driver_hash_count()
+            datasets.driver_hash_count(),
+            datasets.gtfobin_count()
         );
     }
 

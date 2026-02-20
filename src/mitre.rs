@@ -13,6 +13,7 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         EventType::ContainerEscape => add_technique(&mut event, "T1611"),
         EventType::LolRmmMatch => add_technique(&mut event, "T1219"),
         EventType::LolDriverMatch => add_technique(&mut event, "T1068"),
+        EventType::GtfobinMatch => add_technique(&mut event, "T1548"),
         _ => add_technique(&mut event, "T1204"),
     }
 
@@ -278,6 +279,7 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "T1195.002" => ("Resource Development", "Compromise Software Supply Chain"),
         "T1219" => ("Command and Control", "Remote Access Software"),
         "T1068" => ("Privilege Escalation", "Exploitation for Privilege Escalation"),
+        "T1548" => ("Privilege Escalation", "Abuse Elevation Control Mechanism"),
         "T1552" => ("Credential Access", "Unsecured Credentials"),
         "T1574.006" => (
             "Persistence",
@@ -412,5 +414,12 @@ mod tests {
             "loldriver".into(),
         ));
         assert!(has_technique_prefix(&driver_event, "T1068"));
+
+        let gtfobin_event = infer_and_tag(SecurityEvent::new(
+            EventType::GtfobinMatch,
+            ThreatLevel::Orange,
+            "gtfobin".into(),
+        ));
+        assert!(has_technique_prefix(&gtfobin_event, "T1548"));
     }
 }

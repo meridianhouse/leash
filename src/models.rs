@@ -31,6 +31,7 @@ pub enum EventType {
     PromptInjection,
     LolRmmMatch,
     LolDriverMatch,
+    GtfobinMatch,
 }
 
 impl std::fmt::Display for EventType {
@@ -52,6 +53,7 @@ impl std::fmt::Display for EventType {
             EventType::PromptInjection => "prompt_injection",
             EventType::LolRmmMatch => "lol_rmm_match",
             EventType::LolDriverMatch => "lol_driver_match",
+            EventType::GtfobinMatch => "gtfobin_match",
         };
         write!(f, "{text}")
     }

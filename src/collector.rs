@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::datasets::DatasetManager;
+use crate::datasets::{DatasetManager, GtfobinInfo};
 use crate::mitre;
 use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, ThreatLevel};
 use crate::stats;
@@ -40,7 +40,7 @@ impl ProcessCollector {
                     warn!(
                         ?err,
                         path = %cache_dir.display(),
-                        "failed to load datasets cache; LOLRMM process matching disabled until cache is initialized"
+                        "failed to load datasets cache; dataset matching (LOLRMM/LOLDrivers/GTFOBins) disabled until cache is initialized"
                     );
                     None
                 }
@@ -232,6 +232,32 @@ impl ProcessCollector {
                     format!(
                         "LOLRMM tool execution match: {} (process={}) | reference: {}",
                         tool.name, snapshot.info.name, tool.reference_url
+                    ),
+                    snapshot,
+                    all,
+                ));
+            }
+
+            let maybe_gtfobin = datasets
+                .check_gtfobin(&snapshot.info.name)
+                .or_else(|| {
+                    Path::new(&snapshot.info.exe)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| datasets.check_gtfobin(name))
+                });
+
+            if let Some(gtfobin) =
+                maybe_gtfobin.filter(|info| has_dangerous_gtfobin_capabilities(info))
+            {
+                let capabilities = gtfobin.functions.join(", ");
+                let reference = gtfobin_url(&gtfobin.name);
+                events.push(self.make_event(
+                    EventType::GtfobinMatch,
+                    ThreatLevel::Orange,
+                    format!(
+                        "GTFOBins capability match: {} (process={}) | capabilities: {} | reference: {}",
+                        gtfobin.name, snapshot.info.name, capabilities, reference
                     ),
                     snapshot,
                     all,
@@ -1484,6 +1510,22 @@ fn normalize_exec_token(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn has_dangerous_gtfobin_capabilities(info: &GtfobinInfo) -> bool {
+    info.functions.iter().any(|capability| {
+        matches!(
+            capability.as_str(),
+            "shell" | "suid" | "sudo" | "reverse-shell" | "bind-shell" | "file-write"
+        )
+    })
+}
+
+fn gtfobin_url(name: &str) -> String {
+    format!(
+        "https://gtfobins.github.io/gtfobins/{}/",
+        name.trim().to_ascii_lowercase()
+    )
+}
+
 /// Returns true when an allow-list entry matches a process name, command token, or executable path.
 pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe: &str) -> bool {
     let needle = entry_name.trim().to_ascii_lowercase();
@@ -1523,7 +1565,7 @@ mod tests {
     use super::jittered_scan_interval;
     use super::scrub_secrets;
     use crate::config::Config;
-    use crate::datasets::{DatasetManager, RmmToolInfo};
+    use crate::datasets::{DatasetManager, GtfobinInfo, RmmToolInfo};
     use crate::models::{EventType, SecurityEvent};
     use tokio::sync::broadcast;
 
@@ -2079,6 +2121,81 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.event_type == EventType::LolRmmMatch)
+        );
+    }
+
+    #[test]
+    fn emits_gtfobin_match_for_dangerous_capabilities() {
+        let mut collector = collector();
+        let mut datasets = DatasetManager::default();
+        datasets.gtfobins.insert(
+            "python".to_string(),
+            GtfobinInfo {
+                name: "python".to_string(),
+                functions: vec!["shell".to_string(), "file-read".to_string()],
+            },
+        );
+        collector.datasets = Some(datasets);
+
+        let root = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 100,
+                ppid: 1,
+                name: "codex".to_string(),
+                cmdline: "codex run".to_string(),
+                exe: "/usr/bin/codex".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "codex run".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: true,
+            start_ticks: Some(1),
+        };
+        let child = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 101,
+                ppid: 100,
+                name: "python".to_string(),
+                cmdline: "python -c 'print(1)'".to_string(),
+                exe: "/usr/bin/python".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "python -c 'print(1)'".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: false,
+            start_ticks: Some(2),
+        };
+
+        let mut all = HashMap::new();
+        all.insert(100, root);
+        all.insert(101, child.clone());
+
+        let ai_roots = HashSet::from([100]);
+        let events = collector.analyze_monitored_process(101, &child, &all, &ai_roots);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::GtfobinMatch)
         );
     }
 }

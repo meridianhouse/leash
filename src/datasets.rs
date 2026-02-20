@@ -6,6 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const GTFOBINS_TREE_URL: &str =
+    "https://api.github.com/repos/GTFOBins/GTFOBins.github.io/git/trees/master?recursive=1";
+const GTFOBINS_RAW_BASE_URL: &str =
+    "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RmmToolInfo {
     pub name: String,
@@ -24,12 +29,20 @@ pub struct DriverInfo {
     pub filenames: HashSet<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GtfobinInfo {
+    pub name: String,
+    pub functions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetManager {
     pub rmm_tools: HashMap<String, RmmToolInfo>,
     pub rmm_paths: Vec<(String, String)>,
     pub driver_hashes: HashSet<String>,
     pub driver_names: HashMap<String, DriverInfo>,
+    #[serde(default)]
+    pub gtfobins: HashMap<String, GtfobinInfo>,
     pub last_updated: DateTime<Utc>,
 }
 
@@ -40,6 +53,7 @@ impl Default for DatasetManager {
             rmm_paths: Vec::new(),
             driver_hashes: HashSet::new(),
             driver_names: HashMap::new(),
+            gtfobins: HashMap::new(),
             last_updated: Utc::now(),
         }
     }
@@ -69,6 +83,11 @@ impl DatasetManager {
     pub fn check_driver_name(&self, filename: &str) -> Option<&DriverInfo> {
         let normalized = normalize_filename(filename);
         self.driver_names.get(&normalized)
+    }
+
+    pub fn check_gtfobin(&self, name: &str) -> Option<&GtfobinInfo> {
+        let normalized = normalize_process_name(name);
+        self.gtfobins.get(&normalized)
     }
 
     pub fn save_cache(&self, cache_dir: &Path) -> Result<()> {
@@ -118,6 +137,7 @@ impl DatasetManager {
     pub async fn refresh_from_config(&mut self, cfg: &DatasetConfig) -> Result<()> {
         self.fetch_lolrmm(&cfg.lolrmm_url).await?;
         self.fetch_loldrivers(&cfg.loldrivers_url).await?;
+        self.fetch_gtfobins().await?;
         self.last_updated = Utc::now();
         Ok(())
     }
@@ -132,6 +152,74 @@ impl DatasetManager {
 
     pub fn driver_hash_count(&self) -> usize {
         self.driver_hashes.len()
+    }
+
+    pub fn gtfobin_count(&self) -> usize {
+        self.gtfobins.len()
+    }
+
+    pub async fn fetch_gtfobins(&mut self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .user_agent("leash-datasets/0.1")
+            .build()
+            .context("failed to build HTTP client for GTFOBins fetch")?;
+
+        let tree_raw = client
+            .get(GTFOBINS_TREE_URL)
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch GTFOBins tree from {GTFOBINS_TREE_URL}"))?
+            .error_for_status()
+            .with_context(|| {
+                format!("GTFOBins tree fetch returned an error status from {GTFOBINS_TREE_URL}")
+            })?
+            .text()
+            .await
+            .context("failed to read GTFOBins tree response body")?;
+
+        let tree: RawGithubTree =
+            serde_json::from_str(&tree_raw).context("failed to parse GTFOBins tree JSON")?;
+        let mut index = HashMap::new();
+
+        for entry in tree.tree {
+            if entry.kind != "blob" || !is_gtfobin_markdown_path(&entry.path) {
+                continue;
+            }
+
+            let Some(stem) = Path::new(&entry.path).file_stem().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let normalized = normalize_process_name(stem);
+            if normalized.is_empty() {
+                continue;
+            }
+
+            let raw_url = format!("{GTFOBINS_RAW_BASE_URL}/{}", entry.path);
+            let markdown = client
+                .get(&raw_url)
+                .send()
+                .await
+                .with_context(|| format!("failed to fetch GTFOBins markdown from {raw_url}"))?
+                .error_for_status()
+                .with_context(|| {
+                    format!("GTFOBins markdown fetch returned an error status from {raw_url}")
+                })?
+                .text()
+                .await
+                .with_context(|| format!("failed to read GTFOBins markdown body from {raw_url}"))?;
+
+            let functions = parse_gtfobin_functions(&markdown).unwrap_or_default();
+            index.insert(
+                normalized.clone(),
+                GtfobinInfo {
+                    name: normalized,
+                    functions,
+                },
+            );
+        }
+
+        self.gtfobins = index;
+        Ok(())
     }
 
     fn apply_lolrmm_json(&mut self, raw: &str) -> Result<()> {
@@ -315,6 +403,20 @@ struct RawDriverSample {
     original_filename: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct RawGithubTree {
+    #[serde(default)]
+    tree: Vec<RawGithubTreeEntry>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawGithubTreeEntry {
+    #[serde(default)]
+    path: String,
+    #[serde(rename = "type", default)]
+    kind: String,
+}
+
 fn normalize_process_name(input: &str) -> String {
     let token = input
         .trim()
@@ -344,6 +446,64 @@ fn normalize_filename(input: &str) -> String {
 
 fn normalize_sha256(input: &str) -> String {
     input.trim().to_ascii_lowercase()
+}
+
+fn is_gtfobin_markdown_path(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return false;
+    }
+
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|segment| segment == "_gtfobins")
+            .unwrap_or(false)
+    })
+}
+
+fn parse_gtfobin_functions(markdown: &str) -> Result<Vec<String>> {
+    let Some(front_matter) = extract_yaml_front_matter(markdown) else {
+        return Ok(Vec::new());
+    };
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&front_matter).context("failed to parse GTFOBins front matter YAML")?;
+    let Some(functions_map) = parsed.get("functions").and_then(serde_yaml::Value::as_mapping) else {
+        return Ok(Vec::new());
+    };
+
+    let mut functions = Vec::new();
+    for key in functions_map.keys() {
+        if let Some(raw) = key.as_str() {
+            let normalized = raw.trim().to_ascii_lowercase();
+            if !normalized.is_empty() {
+                functions.push(normalized);
+            }
+        }
+    }
+    functions.sort();
+    functions.dedup();
+
+    Ok(functions)
+}
+
+fn extract_yaml_front_matter(markdown: &str) -> Option<String> {
+    let mut lines = markdown.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+
+    let mut yaml = String::new();
+    for line in lines {
+        if line.trim() == "---" {
+            return Some(yaml);
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+
+    None
 }
 
 pub fn compute_sha256_hex(bytes: &[u8]) -> String {
@@ -556,6 +716,51 @@ mod tests {
         manager.driver_names.insert("vuln.sys".to_string(), info);
 
         assert!(manager.check_file_hash(hash).is_some());
+    }
+
+    #[test]
+    fn parses_gtfobins_functions_from_front_matter() {
+        let sample = r#"---
+functions:
+  shell:
+    - description: It can be used to break out.
+      code: python -c "import os; os.system(\"/bin/sh\")"
+  reverse-shell:
+    - description: Connect back
+      code: python -c "..."
+  file-write:
+    - description: Write file
+      code: python -c "..."
+---
+body
+"#;
+
+        let parsed = parse_gtfobin_functions(sample).expect("GTFOBins functions should parse");
+        assert_eq!(
+            parsed,
+            vec![
+                "file-write".to_string(),
+                "reverse-shell".to_string(),
+                "shell".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn check_gtfobin_matches_python() {
+        let mut manager = DatasetManager::default();
+        manager.gtfobins.insert(
+            "python".to_string(),
+            GtfobinInfo {
+                name: "python".to_string(),
+                functions: vec!["shell".to_string(), "suid".to_string()],
+            },
+        );
+
+        let python = manager
+            .check_gtfobin("Python")
+            .expect("python should be indexed");
+        assert!(python.functions.contains(&"shell".to_string()));
     }
 
     #[test]
