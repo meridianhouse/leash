@@ -25,7 +25,7 @@ const HTTP_READ_TIMEOUT_SECS: u64 = 30;
 const HTTP_TOTAL_TIMEOUT_SECS: u64 = 60;
 const LOLRMM_MAX_BYTES: usize = 5 * 1024 * 1024;
 const LOLDRIVERS_MAX_BYTES: usize = 50 * 1024 * 1024;
-const GITHUB_TARBALL_MAX_BYTES: usize = 20 * 1024 * 1024;
+const GITHUB_TARBALL_MAX_BYTES: usize = 50 * 1024 * 1024;
 const GITHUB_TARBALL_EXTRACTED_MAX_BYTES: usize = 50 * 1024 * 1024;
 const GITHUB_FILE_MAX_BYTES: usize = 1024 * 1024;
 const MAX_GITHUB_TARBALL_FILES: usize = 2000;
@@ -326,7 +326,7 @@ impl DatasetManager {
 
         for (path, markdown) in files
             .into_iter()
-            .filter(|(path, _)| path.contains("_gtfobins/") && path.ends_with(".md"))
+            .filter(|(path, _)| path.contains("_gtfobins/") && !path.ends_with("/"))
         {
             let Some(stem) = Path::new(&path).file_stem().and_then(|name| name.to_str()) else {
                 continue;
@@ -813,7 +813,13 @@ async fn fetch_github_tarball(
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase());
-        if !matches!(extension.as_deref(), Some("md" | "yml" | "yaml")) {
+        // Accept .md, .yml, .yaml, or extensionless files in known data directories
+        let is_known_data_dir = path.contains("_gtfobins/") || path.contains("_tunnels/") || path.contains("_c2/") || path.contains("_frameworks/");
+        if !matches!(extension.as_deref(), Some("md" | "yml" | "yaml")) && !is_known_data_dir {
+            continue;
+        }
+        // Skip directories (paths ending with /)
+        if path.ends_with('/') {
             continue;
         }
 
@@ -1031,6 +1037,8 @@ fn is_lolc2_data_path(path: &str) -> bool {
                     || segment.eq_ignore_ascii_case("data")
                     || segment.eq_ignore_ascii_case("_posts")
                     || segment.eq_ignore_ascii_case("posts")
+                    || segment.eq_ignore_ascii_case("doc")
+                    || segment.eq_ignore_ascii_case("docs")
             })
             .unwrap_or(false)
     })
@@ -1149,15 +1157,45 @@ fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolI
         .and_then(|ext| ext.to_str())
         .unwrap_or_default();
 
+    let mut entries = Vec::new();
     let value = if extension == "md" {
-        let Some(front_matter) = extract_yaml_front_matter(content) else {
-            return Ok(Vec::new());
-        };
-        if front_matter.len() > GITHUB_FILE_MAX_BYTES {
-            bail!("LOLC2 front matter exceeds max size for {path}");
+        match extract_yaml_front_matter(content) {
+            Some(front_matter) => {
+                if front_matter.len() > GITHUB_FILE_MAX_BYTES {
+                    bail!("LOLC2 front matter exceeds max size for {path}");
+                }
+                serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
+                    .with_context(|| format!("failed to parse YAML front matter for LOLC2: {path}"))?
+            }
+            None => {
+                // No YAML front matter — derive C2 service from filename and first line
+                let name = Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .replace('_', " ");
+                let description = content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .trim_start_matches('#')
+                    .trim()
+                    .to_string();
+                let key = normalize_process_name(&name);
+                if !key.is_empty() {
+                    entries.push((
+                        key,
+                        C2ToolInfo {
+                            name: name.clone(),
+                            description,
+                            abused_services: vec![name],
+                            reference_url: format!("https://github.com/lolc2/lolc2.github.io/blob/main/{path}"),
+                        },
+                    ));
+                }
+                return Ok(entries);
+            }
         }
-        serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
-            .with_context(|| format!("failed to parse YAML front matter for LOLC2: {path}"))?
     } else {
         serde_yaml::from_str::<serde_yaml::Value>(content)
             .with_context(|| format!("failed to parse YAML for LOLC2: {path}"))?
@@ -1167,7 +1205,6 @@ fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolI
         bail!("LOLC2 YAML has too many top-level entries for {path}");
     }
 
-    let mut entries = Vec::new();
     match value {
         serde_yaml::Value::Sequence(items) => {
             for item in items {
