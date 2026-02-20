@@ -29,8 +29,20 @@ use crate::cli::{AuthCommand, Cli, Commands};
 use crate::config::Config;
 use clap::Parser;
 
-#[tokio::main]
-async fn main() -> Result<(), app::DynError> {
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+fn main() -> Result<(), app::DynError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .thread_stack_size(2 * 1024 * 1024)
+        .build()?;
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<(), app::DynError> {
     init_tracing();
     let cli = Cli::parse();
 

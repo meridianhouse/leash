@@ -10,7 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Arc;
 use tar::Archive;
 use tracing::{info, warn};
 
@@ -36,41 +36,41 @@ const CACHE_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RmmToolInfo {
-    pub name: String,
-    pub description: String,
-    pub reference_url: String,
-    pub installation_paths: Vec<String>,
+    pub name: Box<str>,
+    pub description: Box<str>,
+    pub reference_url: Box<str>,
+    pub installation_paths: Vec<Box<str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DriverInfo {
-    pub id: String,
-    pub category: String,
-    pub reference_url: String,
-    pub cve: Vec<String>,
-    pub sha256_hashes: HashSet<String>,
-    pub filenames: HashSet<String>,
+    pub id: Box<str>,
+    pub category: Arc<str>,
+    pub reference_url: Box<str>,
+    pub cve: Vec<Arc<str>>,
+    pub sha256_hashes: HashSet<Box<str>>,
+    pub filenames: HashSet<Box<str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GtfobinInfo {
-    pub name: String,
-    pub functions: Vec<String>,
+    pub name: Box<str>,
+    pub functions: Vec<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TunnelToolInfo {
-    pub name: String,
-    pub description: String,
-    pub capabilities: Vec<String>,
+    pub name: Box<str>,
+    pub description: Box<str>,
+    pub capabilities: Vec<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct C2ToolInfo {
-    pub name: String,
-    pub description: String,
-    pub abused_services: Vec<String>,
-    pub reference_url: String,
+    pub name: Box<str>,
+    pub description: Box<str>,
+    pub abused_services: Vec<Arc<str>>,
+    pub reference_url: Box<str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +121,7 @@ impl DatasetManager {
         let normalized = normalize_sha256(sha256);
         self.driver_names
             .values()
-            .find(|info| info.sha256_hashes.contains(&normalized))
+            .find(|info| info.sha256_hashes.contains(normalized.as_str()))
     }
 
     pub fn check_driver_name(&self, filename: &str) -> Option<&DriverInfo> {
@@ -231,9 +231,13 @@ impl DatasetManager {
     }
 
     pub async fn fetch_lolrmm(&mut self, url: &str) -> Result<()> {
+        let client = build_dataset_http_client()?;
+        self.fetch_lolrmm_with_client(&client, url).await
+    }
+
+    async fn fetch_lolrmm_with_client(&mut self, client: &Client, url: &str) -> Result<()> {
         ensure_https_url(url, "LOLRMM")?;
-        let client = dataset_http_client()?;
-        let raw = fetch_text_with_limit(&client, url, LOLRMM_MAX_BYTES, "LOLRMM").await?;
+        let raw = fetch_text_with_limit(client, url, LOLRMM_MAX_BYTES, "LOLRMM").await?;
         let old_count = self.rmm_tools.len();
         let mut candidate = self.clone();
         candidate.apply_lolrmm_json(&raw)?;
@@ -257,9 +261,13 @@ impl DatasetManager {
     }
 
     pub async fn fetch_loldrivers(&mut self, url: &str) -> Result<()> {
+        let client = build_dataset_http_client()?;
+        self.fetch_loldrivers_with_client(&client, url).await
+    }
+
+    async fn fetch_loldrivers_with_client(&mut self, client: &Client, url: &str) -> Result<()> {
         ensure_https_url(url, "LOLDrivers")?;
-        let client = dataset_http_client()?;
-        let raw = fetch_text_with_limit(&client, url, LOLDRIVERS_MAX_BYTES, "LOLDrivers").await?;
+        let raw = fetch_text_with_limit(client, url, LOLDRIVERS_MAX_BYTES, "LOLDrivers").await?;
         let old_count = self.driver_names.len();
         let mut candidate = self.clone();
         candidate.apply_loldrivers_json(&raw)?;
@@ -285,11 +293,14 @@ impl DatasetManager {
     pub async fn refresh_from_config(&mut self, cfg: &DatasetConfig) -> Result<()> {
         ensure_https_url(&cfg.lolrmm_url, "LOLRMM")?;
         ensure_https_url(&cfg.loldrivers_url, "LOLDrivers")?;
-        self.fetch_lolrmm(&cfg.lolrmm_url).await?;
-        self.fetch_loldrivers(&cfg.loldrivers_url).await?;
-        self.fetch_gtfobins().await?;
-        self.fetch_lot_tunnels().await?;
-        self.fetch_lolc2().await?;
+        let client = build_dataset_http_client()?;
+        self.fetch_lolrmm_with_client(&client, &cfg.lolrmm_url)
+            .await?;
+        self.fetch_loldrivers_with_client(&client, &cfg.loldrivers_url)
+            .await?;
+        self.fetch_gtfobins_with_client(&client).await?;
+        self.fetch_lot_tunnels_with_client(&client).await?;
+        self.fetch_lolc2_with_client(&client).await?;
         self.last_updated = Utc::now();
         Ok(())
     }
@@ -319,7 +330,11 @@ impl DatasetManager {
     }
 
     pub async fn fetch_gtfobins(&mut self) -> Result<()> {
-        let client = dataset_http_client()?;
+        let client = build_dataset_http_client()?;
+        self.fetch_gtfobins_with_client(&client).await
+    }
+
+    async fn fetch_gtfobins_with_client(&mut self, client: &Client) -> Result<()> {
         let files =
             fetch_github_tarball(client, GTFOBINS_TARBALL_URL, GITHUB_TARBALL_MAX_BYTES).await?;
         let mut index = HashMap::new();
@@ -340,8 +355,8 @@ impl DatasetManager {
             index.insert(
                 normalized.clone(),
                 GtfobinInfo {
-                    name: normalized,
-                    functions,
+                    name: normalized.into_boxed_str(),
+                    functions: arc_str_vec(functions),
                 },
             );
         }
@@ -366,7 +381,11 @@ impl DatasetManager {
     }
 
     pub async fn fetch_lot_tunnels(&mut self) -> Result<()> {
-        let client = dataset_http_client()?;
+        let client = build_dataset_http_client()?;
+        self.fetch_lot_tunnels_with_client(&client).await
+    }
+
+    async fn fetch_lot_tunnels_with_client(&mut self, client: &Client) -> Result<()> {
         let files =
             fetch_github_tarball(client, LOT_TUNNELS_TARBALL_URL, GITHUB_TARBALL_MAX_BYTES).await?;
         let mut index = HashMap::new();
@@ -400,7 +419,11 @@ impl DatasetManager {
     }
 
     pub async fn fetch_lolc2(&mut self) -> Result<()> {
-        let client = dataset_http_client()?;
+        let client = build_dataset_http_client()?;
+        self.fetch_lolc2_with_client(&client).await
+    }
+
+    async fn fetch_lolc2_with_client(&mut self, client: &Client) -> Result<()> {
         let files =
             fetch_github_tarball(client, LOLC2_TARBALL_URL, GITHUB_TARBALL_MAX_BYTES).await?;
         let mut index = HashMap::new();
@@ -504,10 +527,10 @@ impl DatasetManager {
                 self.rmm_tools.insert(
                     process_name,
                     RmmToolInfo {
-                        name: tool_name.clone(),
-                        description: tool.description.clone(),
-                        reference_url: reference_url.clone(),
-                        installation_paths: tool.details.installation_paths.clone(),
+                        name: tool_name.clone().into_boxed_str(),
+                        description: tool.description.clone().into_boxed_str(),
+                        reference_url: reference_url.clone().into_boxed_str(),
+                        installation_paths: boxed_str_vec(tool.details.installation_paths.clone()),
                     },
                 );
             }
@@ -541,22 +564,22 @@ impl DatasetManager {
                 .cloned()
                 .unwrap_or_else(|| "https://www.loldrivers.io/".to_string());
 
-            let mut hashes = HashSet::new();
-            let mut filenames = HashSet::new();
+            let mut hashes: HashSet<Box<str>> = HashSet::new();
+            let mut filenames: HashSet<Box<str>> = HashSet::new();
 
             for sample in entry.known_vulnerable_samples {
                 if !sample.sha256.trim().is_empty() {
                     let normalized_hash = normalize_sha256(&sample.sha256);
                     if !normalized_hash.is_empty() {
                         self.driver_hashes.insert(normalized_hash.clone());
-                        hashes.insert(normalized_hash);
+                        hashes.insert(normalized_hash.into_boxed_str());
                     }
                 }
 
                 if !sample.original_filename.trim().is_empty() {
                     let normalized_name = normalize_filename(&sample.original_filename);
                     if !normalized_name.is_empty() {
-                        filenames.insert(normalized_name);
+                        filenames.insert(normalized_name.into_boxed_str());
                     }
                 }
             }
@@ -564,7 +587,7 @@ impl DatasetManager {
             for tag in entry.tags {
                 let normalized_name = normalize_filename(&tag);
                 if !normalized_name.is_empty() {
-                    filenames.insert(normalized_name);
+                    filenames.insert(normalized_name.into_boxed_str());
                 }
             }
 
@@ -573,16 +596,16 @@ impl DatasetManager {
             }
 
             let info = DriverInfo {
-                id: entry.id,
-                category: entry.category,
-                reference_url,
-                cve: entry.cve,
+                id: entry.id.into_boxed_str(),
+                category: Arc::<str>::from(entry.category),
+                reference_url: reference_url.into_boxed_str(),
+                cve: arc_str_vec(entry.cve),
                 sha256_hashes: hashes,
                 filenames: filenames.clone(),
             };
 
             for filename in filenames {
-                self.driver_names.insert(filename, info.clone());
+                self.driver_names.insert(filename.into(), info.clone());
             }
         }
 
@@ -711,11 +734,7 @@ struct RawDriverSample {
     original_filename: String,
 }
 
-fn dataset_http_client() -> Result<&'static reqwest::Client> {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    if let Some(client) = CLIENT.get() {
-        return Ok(client);
-    }
+fn build_dataset_http_client() -> Result<reqwest::Client> {
     let built = reqwest::Client::builder()
         .user_agent("leash-datasets/0.1")
         .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
@@ -723,10 +742,15 @@ fn dataset_http_client() -> Result<&'static reqwest::Client> {
         .timeout(std::time::Duration::from_secs(HTTP_TOTAL_TIMEOUT_SECS))
         .build()
         .context("failed to build dataset HTTP client")?;
-    let _ = CLIENT.set(built);
-    CLIENT
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("dataset HTTP client initialization failed"))
+    Ok(built)
+}
+
+fn boxed_str_vec(values: Vec<String>) -> Vec<Box<str>> {
+    values.into_iter().map(String::into_boxed_str).collect()
+}
+
+fn arc_str_vec(values: Vec<String>) -> Vec<Arc<str>> {
+    values.into_iter().map(Arc::<str>::from).collect()
 }
 
 fn sanitize_url(raw: &str) -> String {
@@ -814,7 +838,10 @@ async fn fetch_github_tarball(
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase());
         // Accept .md, .yml, .yaml, or extensionless files in known data directories
-        let is_known_data_dir = path.contains("_gtfobins/") || path.contains("_tunnels/") || path.contains("_c2/") || path.contains("_frameworks/");
+        let is_known_data_dir = path.contains("_gtfobins/")
+            || path.contains("_tunnels/")
+            || path.contains("_c2/")
+            || path.contains("_frameworks/");
         if !matches!(extension.as_deref(), Some("md" | "yml" | "yaml")) && !is_known_data_dir {
             continue;
         }
@@ -1164,8 +1191,9 @@ fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolI
                 if front_matter.len() > GITHUB_FILE_MAX_BYTES {
                     bail!("LOLC2 front matter exceeds max size for {path}");
                 }
-                serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
-                    .with_context(|| format!("failed to parse YAML front matter for LOLC2: {path}"))?
+                serde_yaml::from_str::<serde_yaml::Value>(&front_matter).with_context(|| {
+                    format!("failed to parse YAML front matter for LOLC2: {path}")
+                })?
             }
             None => {
                 // No YAML front matter — derive C2 service from filename and first line
@@ -1186,10 +1214,13 @@ fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolI
                     entries.push((
                         key,
                         C2ToolInfo {
-                            name: name.clone(),
-                            description,
-                            abused_services: vec![name],
-                            reference_url: format!("https://github.com/lolc2/lolc2.github.io/blob/main/{path}"),
+                            name: name.clone().into_boxed_str(),
+                            description: description.into_boxed_str(),
+                            abused_services: vec![Arc::<str>::from(name)],
+                            reference_url: format!(
+                                "https://github.com/lolc2/lolc2.github.io/blob/main/{path}"
+                            )
+                            .into_boxed_str(),
                         },
                     ));
                 }
@@ -1304,9 +1335,9 @@ fn build_lot_tunnel_info(
     Some((
         keys,
         TunnelToolInfo {
-            name,
-            description,
-            capabilities,
+            name: name.into_boxed_str(),
+            description: description.into_boxed_str(),
+            capabilities: arc_str_vec(capabilities),
         },
     ))
 }
@@ -1420,10 +1451,10 @@ fn build_lolc2_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<String
     Some((
         keys,
         C2ToolInfo {
-            name,
-            description,
-            abused_services,
-            reference_url,
+            name: name.into_boxed_str(),
+            description: description.into_boxed_str(),
+            abused_services: arc_str_vec(abused_services),
+            reference_url: reference_url.into_boxed_str(),
         },
     ))
 }
@@ -1673,9 +1704,9 @@ mod tests {
         manager.rmm_tools.insert(
             "anydesk".to_string(),
             RmmToolInfo {
-                name: "AnyDesk".to_string(),
-                description: "Remote desktop".to_string(),
-                reference_url: "https://lolrmm.io/".to_string(),
+                name: "AnyDesk".into(),
+                description: "Remote desktop".into(),
+                reference_url: "https://lolrmm.io/".into(),
                 installation_paths: vec![],
             },
         );
@@ -1688,15 +1719,15 @@ mod tests {
     fn check_file_hash_matches_known_hash() {
         let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let mut hashes = HashSet::new();
-        hashes.insert(hash.to_string());
+        hashes.insert(hash.into());
 
         let mut names = HashSet::new();
-        names.insert("vuln.sys".to_string());
+        names.insert("vuln.sys".into());
 
         let info = DriverInfo {
-            id: "id-1".to_string(),
-            category: "vulnerable".to_string(),
-            reference_url: "https://www.loldrivers.io/".to_string(),
+            id: "id-1".into(),
+            category: "vulnerable".into(),
+            reference_url: "https://www.loldrivers.io/".into(),
             cve: vec![],
             sha256_hashes: hashes.clone(),
             filenames: names,
@@ -1743,15 +1774,15 @@ body
         manager.gtfobins.insert(
             "python".to_string(),
             GtfobinInfo {
-                name: "python".to_string(),
-                functions: vec!["shell".to_string(), "suid".to_string()],
+                name: "python".into(),
+                functions: vec!["shell".into(), "suid".into()],
             },
         );
 
         let python = manager
             .check_gtfobin("Python")
             .expect("python should be indexed");
-        assert!(python.functions.contains(&"shell".to_string()));
+        assert!(python.functions.iter().any(|f| f.as_ref() == "shell"));
     }
 
     #[test]
@@ -1786,9 +1817,9 @@ binaries:
             manager.tunnels.insert(
                 name.to_string(),
                 TunnelToolInfo {
-                    name: name.to_string(),
-                    description: "Tunnel utility".to_string(),
-                    capabilities: vec!["c2".to_string(), "exfiltration".to_string()],
+                    name: name.into(),
+                    description: "Tunnel utility".into(),
+                    capabilities: vec!["c2".into(), "exfiltration".into()],
                 },
             );
         }
@@ -1839,10 +1870,10 @@ content
         manager.c2_tools.insert(
             "sliver".to_string(),
             C2ToolInfo {
-                name: "sliver".to_string(),
-                description: "C2 framework".to_string(),
-                abused_services: vec!["discord".to_string(), "slack".to_string()],
-                reference_url: "https://lolc2.github.io/".to_string(),
+                name: "sliver".into(),
+                description: "C2 framework".into(),
+                abused_services: vec!["discord".into(), "slack".into()],
+                reference_url: "https://lolc2.github.io/".into(),
             },
         );
 

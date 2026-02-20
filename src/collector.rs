@@ -1790,7 +1790,7 @@ fn normalize_exec_token(input: &str) -> String {
 fn has_dangerous_gtfobin_capabilities(info: &GtfobinInfo) -> bool {
     info.functions.iter().any(|capability| {
         matches!(
-            capability.as_str(),
+            &**capability,
             "shell" | "suid" | "sudo" | "reverse-shell" | "bind-shell" | "file-write"
         )
     })
@@ -2537,9 +2537,9 @@ mod tests {
         datasets.rmm_tools.insert(
             "anydesk".to_string(),
             RmmToolInfo {
-                name: "AnyDesk".to_string(),
-                description: "Remote desktop".to_string(),
-                reference_url: "https://lolrmm.io/".to_string(),
+                name: "AnyDesk".into(),
+                description: "Remote desktop".into(),
+                reference_url: "https://lolrmm.io/".into(),
                 installation_paths: vec![],
             },
         );
@@ -2614,8 +2614,8 @@ mod tests {
         datasets.gtfobins.insert(
             "python".to_string(),
             GtfobinInfo {
-                name: "python".to_string(),
-                functions: vec!["shell".to_string(), "file-read".to_string()],
+                name: "python".into(),
+                functions: vec!["shell".into(), "file-read".into()],
             },
         );
         collector.datasets = Some(datasets);
@@ -2689,9 +2689,9 @@ mod tests {
         datasets.tunnels.insert(
             "ngrok".to_string(),
             TunnelToolInfo {
-                name: "ngrok".to_string(),
-                description: "Public tunnel service".to_string(),
-                capabilities: vec!["c2".to_string(), "exfiltration".to_string()],
+                name: "ngrok".into(),
+                description: "Public tunnel service".into(),
+                capabilities: vec!["c2".into(), "exfiltration".into()],
             },
         );
         collector.datasets = Some(datasets);
@@ -2765,10 +2765,10 @@ mod tests {
         datasets.c2_tools.insert(
             "sliver".to_string(),
             C2ToolInfo {
-                name: "Sliver".to_string(),
-                description: "C2 over legitimate channels".to_string(),
-                abused_services: vec!["discord".to_string(), "slack".to_string()],
-                reference_url: "https://lolc2.github.io/".to_string(),
+                name: "Sliver".into(),
+                description: "C2 over legitimate channels".into(),
+                abused_services: vec!["discord".into(), "slack".into()],
+                reference_url: "https://lolc2.github.io/".into(),
             },
         );
         collector.datasets = Some(datasets);
