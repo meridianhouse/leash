@@ -10,9 +10,11 @@ use bytes::BytesMut;
 use nix::libc;
 use procfs::process::Process;
 use std::convert::TryInto;
+use std::fs;
 use std::io;
 use std::mem;
 use std::os::fd::RawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -38,6 +40,7 @@ const EBPF_EVENT_CONNECT: u32 = 4;
 
 const PROC_CONNECTOR_MIN_INTERVAL_MS: u64 = 2_000;
 const PROC_CONNECTOR_BUF_SIZE: usize = 4096;
+const DEFAULT_TRUSTED_EBPF_OBJECT_PATH: &str = "/usr/lib/leash/leash-ebpf.o";
 
 pub trait KernelMonitor {
     fn attach(&mut self) -> Result<()>;
@@ -65,7 +68,7 @@ pub struct KernelMonitorOptions {
 impl Default for KernelMonitorOptions {
     fn default() -> Self {
         Self {
-            ebpf_object_path: std::env::var("LEASH_EBPF_OBJECT").ok().map(PathBuf::from),
+            ebpf_object_path: debug_ebpf_override_path(),
             proc_connector_protocol: NETLINK_CONNECTOR,
         }
     }
@@ -246,14 +249,49 @@ fn spawn_ebpf_task(
 }
 
 fn resolve_ebpf_object(path: Option<PathBuf>) -> Result<PathBuf> {
-    let path = path.unwrap_or_else(|| PathBuf::from("/usr/lib/leash/leash-ebpf.o"));
+    let path = path.unwrap_or_else(|| PathBuf::from(DEFAULT_TRUSTED_EBPF_OBJECT_PATH));
     if !path.exists() {
+        anyhow::bail!("eBPF object not found at {}", path.display());
+    }
+    validate_ebpf_object_file(&path)?;
+    Ok(path)
+}
+
+#[cfg(debug_assertions)]
+fn debug_ebpf_override_path() -> Option<PathBuf> {
+    std::env::var("LEASH_EBPF_OBJECT").ok().map(PathBuf::from)
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_ebpf_override_path() -> Option<PathBuf> {
+    None
+}
+
+fn validate_ebpf_object_file(path: &PathBuf) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to stat eBPF object {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("eBPF object must be a regular file: {}", path.display());
+    }
+    let uid = metadata.uid();
+    let current_uid = unsafe { libc::geteuid() };
+    if uid != current_uid && uid != 0 {
         anyhow::bail!(
-            "eBPF object not found at {} (set LEASH_EBPF_OBJECT to override)",
+            "eBPF object owner must be current user ({}) or root (0), got {} for {}",
+            current_uid,
+            uid,
             path.display()
         );
     }
-    Ok(path)
+    let mode = metadata.mode();
+    if mode & 0o002 != 0 {
+        anyhow::bail!(
+            "eBPF object is world-writable and untrusted: {} (mode {:o})",
+            path.display(),
+            mode & 0o7777
+        );
+    }
+    Ok(())
 }
 
 fn attach_tracepoints(bpf: &mut Ebpf) -> Result<()> {
@@ -648,8 +686,9 @@ fn parse_ebpf_event(buf: &[u8]) -> Option<SecurityEvent> {
         return None;
     }
 
-    // SAFETY: size checked above and RawEbpfEvent is plain-old-data.
-    let raw = unsafe { *(buf.as_ptr() as *const RawEbpfEvent) };
+    // SAFETY: buf size is validated above and perf buffers are not guaranteed to be naturally
+    // aligned for RawEbpfEvent, so an unaligned read is required here.
+    let raw = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const RawEbpfEvent) };
 
     let comm = c_bytes_to_string(&raw.comm);
     let filename = c_bytes_to_string(&raw.filename);

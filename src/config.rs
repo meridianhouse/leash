@@ -298,9 +298,9 @@ impl Config {
                 self.datasets.loldrivers_url.trim(),
             ),
         ] {
-            if !url.is_empty() && !is_valid_http_or_https_url(url) {
+            if !url.is_empty() && !is_valid_https_url(url) {
                 errors.push(format!(
-                    "{name} must start with http:// or https:// (got '{url}')"
+                    "{name} must start with https:// (got '{url}')"
                 ));
             }
         }

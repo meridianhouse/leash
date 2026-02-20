@@ -1,10 +1,15 @@
 use crate::config::DatasetConfig;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
+use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use tracing::{info, warn};
 
 const GTFOBINS_TREE_URL: &str =
     "https://api.github.com/repos/GTFOBins/GTFOBins.github.io/git/trees/master?recursive=1";
@@ -17,6 +22,19 @@ const LOT_TUNNELS_RAW_BASE_URL: &str =
 const LOLC2_TREE_URL: &str =
     "https://api.github.com/repos/lolc2/lolc2.github.io/git/trees/main?recursive=1";
 const LOLC2_RAW_BASE_URL: &str = "https://raw.githubusercontent.com/lolc2/lolc2.github.io/main";
+
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+const HTTP_READ_TIMEOUT_SECS: u64 = 30;
+const HTTP_TOTAL_TIMEOUT_SECS: u64 = 60;
+const LOLRMM_MAX_BYTES: usize = 5 * 1024 * 1024;
+const LOLDRIVERS_MAX_BYTES: usize = 50 * 1024 * 1024;
+const GITHUB_TREE_MAX_BYTES: usize = 5 * 1024 * 1024;
+const GITHUB_FILE_MAX_BYTES: usize = 1024 * 1024;
+const MAX_GITHUB_TREE_ENTRIES: usize = 1000;
+const MAX_TOP_LEVEL_ENTRIES: usize = 10_000;
+const MAX_YAML_DEPTH: usize = 64;
+const CACHE_DIR_MODE: u32 = 0o700;
+const CACHE_FILE_MODE: u32 = 0o600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RmmToolInfo {
@@ -132,48 +150,137 @@ impl DatasetManager {
         fs::create_dir_all(cache_dir).with_context(|| {
             format!("failed to create dataset cache dir {}", cache_dir.display())
         })?;
-
+        fs::set_permissions(cache_dir, fs::Permissions::from_mode(CACHE_DIR_MODE))
+            .with_context(|| format!("failed to set mode on {}", cache_dir.display()))?;
         let data = serde_json::to_vec(self).context("failed to serialize datasets")?;
         let target = cache_dir.join("datasets.json");
-        fs::write(&target, data)
-            .with_context(|| format!("failed to write dataset cache {}", target.display()))?;
+        let tmp = cache_dir.join(format!(
+            ".datasets.json.tmp.{}.{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut handle = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(CACHE_FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+            .with_context(|| format!("failed to open temp dataset cache {}", tmp.display()))?;
+        handle
+            .write_all(&data)
+            .with_context(|| format!("failed to write temp dataset cache {}", tmp.display()))?;
+        handle
+            .sync_all()
+            .with_context(|| format!("failed to sync temp dataset cache {}", tmp.display()))?;
+        drop(handle);
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(CACHE_FILE_MODE))
+            .with_context(|| format!("failed to set mode on {}", tmp.display()))?;
+        fs::rename(&tmp, &target).with_context(|| {
+            format!(
+                "failed to atomically rename dataset cache {} -> {}",
+                tmp.display(),
+                target.display()
+            )
+        })?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(CACHE_FILE_MODE))
+            .with_context(|| format!("failed to set mode on {}", target.display()))?;
         Ok(())
     }
 
     pub fn load_cache(cache_dir: &Path) -> Result<Self> {
         let target = cache_dir.join("datasets.json");
-        let bytes = fs::read(&target)
+        let metadata = fs::symlink_metadata(&target)
+            .with_context(|| format!("failed to stat dataset cache {}", target.display()))?;
+        if !metadata.file_type().is_file() {
+            bail!("dataset cache is not a regular file: {}", target.display());
+        }
+        let uid = metadata.uid();
+        let current_uid = unsafe { libc::geteuid() };
+        if uid != current_uid {
+            bail!(
+                "dataset cache owner mismatch: {} owned by uid {}, expected uid {}",
+                target.display(),
+                uid,
+                current_uid
+            );
+        }
+
+        let mut handle = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&target)
+            .with_context(|| format!("failed to open dataset cache {}", target.display()))?;
+        let opened = handle
+            .metadata()
+            .with_context(|| format!("failed to read metadata for {}", target.display()))?;
+        if !opened.file_type().is_file() {
+            bail!(
+                "dataset cache is not a regular file after open: {}",
+                target.display()
+            );
+        }
+        if opened.uid() != current_uid {
+            bail!(
+                "dataset cache owner changed during open: {}",
+                target.display()
+            );
+        }
+        let mut bytes = Vec::new();
+        handle
+            .read_to_end(&mut bytes)
             .with_context(|| format!("failed to read dataset cache {}", target.display()))?;
         serde_json::from_slice(&bytes).context("failed to deserialize dataset cache")
     }
 
     pub async fn fetch_lolrmm(&mut self, url: &str) -> Result<()> {
-        let raw = reqwest::get(url)
-            .await
-            .with_context(|| format!("failed to fetch LOLRMM dataset from {url}"))?
-            .error_for_status()
-            .with_context(|| format!("LOLRMM fetch returned an error status from {url}"))?
-            .text()
-            .await
-            .context("failed to read LOLRMM response body")?;
-
-        self.apply_lolrmm_json(&raw)
+        ensure_https_url(url, "LOLRMM")?;
+        let client = dataset_http_client()?;
+        let raw = fetch_text_with_limit(&client, url, LOLRMM_MAX_BYTES, "LOLRMM").await?;
+        let old_count = self.rmm_tools.len();
+        let mut candidate = self.clone();
+        candidate.apply_lolrmm_json(&raw)?;
+        let new_count = candidate.rmm_tools.len();
+        if !dataset_count_sane(old_count, new_count) {
+            warn!(
+                dataset = "lolrmm",
+                old_count,
+                new_count,
+                "dataset refresh rejected by sanity checks; keeping previous cache"
+            );
+            return Ok(());
+        }
+        info!(dataset = "lolrmm", old_count, new_count, "dataset refresh stats");
+        self.rmm_tools = candidate.rmm_tools;
+        self.rmm_paths = candidate.rmm_paths;
+        Ok(())
     }
 
     pub async fn fetch_loldrivers(&mut self, url: &str) -> Result<()> {
-        let raw = reqwest::get(url)
-            .await
-            .with_context(|| format!("failed to fetch LOLDrivers dataset from {url}"))?
-            .error_for_status()
-            .with_context(|| format!("LOLDrivers fetch returned an error status from {url}"))?
-            .text()
-            .await
-            .context("failed to read LOLDrivers response body")?;
-
-        self.apply_loldrivers_json(&raw)
+        ensure_https_url(url, "LOLDrivers")?;
+        let client = dataset_http_client()?;
+        let raw = fetch_text_with_limit(&client, url, LOLDRIVERS_MAX_BYTES, "LOLDrivers").await?;
+        let old_count = self.driver_names.len();
+        let mut candidate = self.clone();
+        candidate.apply_loldrivers_json(&raw)?;
+        let new_count = candidate.driver_names.len();
+        if !dataset_count_sane(old_count, new_count) {
+            warn!(
+                dataset = "loldrivers",
+                old_count,
+                new_count,
+                "dataset refresh rejected by sanity checks; keeping previous cache"
+            );
+            return Ok(());
+        }
+        info!(dataset = "loldrivers", old_count, new_count, "dataset refresh stats");
+        self.driver_hashes = candidate.driver_hashes;
+        self.driver_names = candidate.driver_names;
+        Ok(())
     }
 
     pub async fn refresh_from_config(&mut self, cfg: &DatasetConfig) -> Result<()> {
+        ensure_https_url(&cfg.lolrmm_url, "LOLRMM")?;
+        ensure_https_url(&cfg.loldrivers_url, "LOLDrivers")?;
         self.fetch_lolrmm(&cfg.lolrmm_url).await?;
         self.fetch_loldrivers(&cfg.loldrivers_url).await?;
         self.fetch_gtfobins().await?;
@@ -208,33 +315,22 @@ impl DatasetManager {
     }
 
     pub async fn fetch_gtfobins(&mut self) -> Result<()> {
-        let client = reqwest::Client::builder()
-            .user_agent("leash-datasets/0.1")
-            .build()
-            .context("failed to build HTTP client for GTFOBins fetch")?;
+        let client = dataset_http_client()?;
 
-        let tree_raw = client
-            .get(GTFOBINS_TREE_URL)
-            .send()
-            .await
-            .with_context(|| format!("failed to fetch GTFOBins tree from {GTFOBINS_TREE_URL}"))?
-            .error_for_status()
-            .with_context(|| {
-                format!("GTFOBins tree fetch returned an error status from {GTFOBINS_TREE_URL}")
-            })?
-            .text()
-            .await
-            .context("failed to read GTFOBins tree response body")?;
+        let tree_raw =
+            fetch_text_with_limit(&client, GTFOBINS_TREE_URL, GITHUB_TREE_MAX_BYTES, "GTFOBins tree")
+                .await?;
 
         let tree: RawGithubTree =
             serde_json::from_str(&tree_raw).context("failed to parse GTFOBins tree JSON")?;
         let mut index = HashMap::new();
 
-        for entry in tree.tree {
-            if entry.kind != "blob" || !is_gtfobin_markdown_path(&entry.path) {
-                continue;
-            }
-
+        for entry in tree
+            .tree
+            .into_iter()
+            .filter(|entry| entry.kind == "blob" && is_gtfobin_markdown_path(&entry.path))
+            .take(MAX_GITHUB_TREE_ENTRIES)
+        {
             let Some(stem) = Path::new(&entry.path)
                 .file_stem()
                 .and_then(|name| name.to_str())
@@ -247,18 +343,9 @@ impl DatasetManager {
             }
 
             let raw_url = format!("{GTFOBINS_RAW_BASE_URL}/{}", entry.path);
-            let markdown = client
-                .get(&raw_url)
-                .send()
-                .await
-                .with_context(|| format!("failed to fetch GTFOBins markdown from {raw_url}"))?
-                .error_for_status()
-                .with_context(|| {
-                    format!("GTFOBins markdown fetch returned an error status from {raw_url}")
-                })?
-                .text()
-                .await
-                .with_context(|| format!("failed to read GTFOBins markdown body from {raw_url}"))?;
+            let markdown =
+                fetch_text_with_limit(&client, &raw_url, GITHUB_FILE_MAX_BYTES, "GTFOBins markdown")
+                    .await?;
 
             let functions = parse_gtfobin_functions(&markdown).unwrap_or_default();
             index.insert(
@@ -270,119 +357,121 @@ impl DatasetManager {
             );
         }
 
+        let old_count = self.gtfobins.len();
+        let new_count = index.len();
+        if !dataset_count_sane(old_count, new_count) {
+            warn!(
+                dataset = "gtfobins",
+                old_count,
+                new_count,
+                "dataset refresh rejected by sanity checks; keeping previous cache"
+            );
+            return Ok(());
+        }
+        info!(dataset = "gtfobins", old_count, new_count, "dataset refresh stats");
         self.gtfobins = index;
         Ok(())
     }
 
     pub async fn fetch_lot_tunnels(&mut self) -> Result<()> {
-        let client = reqwest::Client::builder()
-            .user_agent("leash-datasets/0.1")
-            .build()
-            .context("failed to build HTTP client for LOT Tunnels fetch")?;
+        let client = dataset_http_client()?;
 
-        let tree_raw = client
-            .get(LOT_TUNNELS_TREE_URL)
-            .send()
-            .await
-            .with_context(|| {
-                format!("failed to fetch LOT Tunnels tree from {LOT_TUNNELS_TREE_URL}")
-            })?
-            .error_for_status()
-            .with_context(|| {
-                format!(
-                    "LOT Tunnels tree fetch returned an error status from {LOT_TUNNELS_TREE_URL}"
-                )
-            })?
-            .text()
-            .await
-            .context("failed to read LOT Tunnels tree response body")?;
+        let tree_raw =
+            fetch_text_with_limit(&client, LOT_TUNNELS_TREE_URL, GITHUB_TREE_MAX_BYTES, "LOT Tunnels tree")
+                .await?;
 
         let tree: RawGithubTree =
             serde_json::from_str(&tree_raw).context("failed to parse LOT Tunnels tree JSON")?;
         let mut index = HashMap::new();
 
-        for entry in tree.tree {
-            if entry.kind != "blob" || !is_lot_tunnel_data_path(&entry.path) {
-                continue;
-            }
-
+        for entry in tree
+            .tree
+            .into_iter()
+            .filter(|entry| entry.kind == "blob" && is_lot_tunnel_data_path(&entry.path))
+            .take(MAX_GITHUB_TREE_ENTRIES)
+        {
             let raw_url = format!("{LOT_TUNNELS_RAW_BASE_URL}/{}", entry.path);
-            let content = client
-                .get(&raw_url)
-                .send()
-                .await
-                .with_context(|| format!("failed to fetch LOT Tunnels entry from {raw_url}"))?
-                .error_for_status()
-                .with_context(|| {
-                    format!("LOT Tunnels entry fetch returned an error status from {raw_url}")
-                })?
-                .text()
-                .await
-                .with_context(|| format!("failed to read LOT Tunnels entry body from {raw_url}"))?;
+            let content =
+                fetch_text_with_limit(&client, &raw_url, GITHUB_FILE_MAX_BYTES, "LOT Tunnels entry")
+                    .await?;
 
             for (key, info) in parse_lot_tunnel_entries(&entry.path, &content)? {
                 index.insert(key, info);
             }
         }
 
+        let old_count = self.tunnels.len();
+        let new_count = index.len();
+        if !dataset_count_sane(old_count, new_count) {
+            warn!(
+                dataset = "lot_tunnels",
+                old_count,
+                new_count,
+                "dataset refresh rejected by sanity checks; keeping previous cache"
+            );
+            return Ok(());
+        }
+        info!(dataset = "lot_tunnels", old_count, new_count, "dataset refresh stats");
         self.tunnels = index;
         Ok(())
     }
 
     pub async fn fetch_lolc2(&mut self) -> Result<()> {
-        let client = reqwest::Client::builder()
-            .user_agent("leash-datasets/0.1")
-            .build()
-            .context("failed to build HTTP client for LOLC2 fetch")?;
+        let client = dataset_http_client()?;
 
-        let tree_raw = client
-            .get(LOLC2_TREE_URL)
-            .send()
-            .await
-            .with_context(|| format!("failed to fetch LOLC2 tree from {LOLC2_TREE_URL}"))?
-            .error_for_status()
-            .with_context(|| {
-                format!("LOLC2 tree fetch returned an error status from {LOLC2_TREE_URL}")
-            })?
-            .text()
-            .await
-            .context("failed to read LOLC2 tree response body")?;
+        let tree_raw =
+            fetch_text_with_limit(&client, LOLC2_TREE_URL, GITHUB_TREE_MAX_BYTES, "LOLC2 tree")
+                .await?;
 
         let tree: RawGithubTree =
             serde_json::from_str(&tree_raw).context("failed to parse LOLC2 tree JSON")?;
         let mut index = HashMap::new();
 
-        for entry in tree.tree {
-            if entry.kind != "blob" || !is_lolc2_data_path(&entry.path) {
-                continue;
-            }
-
+        for entry in tree
+            .tree
+            .into_iter()
+            .filter(|entry| entry.kind == "blob" && is_lolc2_data_path(&entry.path))
+            .take(MAX_GITHUB_TREE_ENTRIES)
+        {
             let raw_url = format!("{LOLC2_RAW_BASE_URL}/{}", entry.path);
-            let content = client
-                .get(&raw_url)
-                .send()
-                .await
-                .with_context(|| format!("failed to fetch LOLC2 entry from {raw_url}"))?
-                .error_for_status()
-                .with_context(|| {
-                    format!("LOLC2 entry fetch returned an error status from {raw_url}")
-                })?
-                .text()
-                .await
-                .with_context(|| format!("failed to read LOLC2 entry body from {raw_url}"))?;
+            let content =
+                fetch_text_with_limit(&client, &raw_url, GITHUB_FILE_MAX_BYTES, "LOLC2 entry")
+                    .await?;
 
             for (key, info) in parse_lolc2_entries(&entry.path, &content)? {
                 index.insert(key, info);
             }
         }
 
+        let old_count = self.c2_tools.len();
+        let new_count = index.len();
+        if !dataset_count_sane(old_count, new_count) {
+            warn!(
+                dataset = "lolc2",
+                old_count,
+                new_count,
+                "dataset refresh rejected by sanity checks; keeping previous cache"
+            );
+            return Ok(());
+        }
+        info!(dataset = "lolc2", old_count, new_count, "dataset refresh stats");
         self.c2_tools = index;
         Ok(())
     }
 
     fn apply_lolrmm_json(&mut self, raw: &str) -> Result<()> {
+        if raw.len() > LOLRMM_MAX_BYTES {
+            bail!("LOLRMM payload exceeded max size");
+        }
         let tools: Vec<RawRmmTool> =
             serde_json::from_str(raw).context("failed to parse LOLRMM JSON")?;
+        if tools.len() > MAX_TOP_LEVEL_ENTRIES {
+            bail!(
+                "LOLRMM payload has too many top-level entries: {} > {}",
+                tools.len(),
+                MAX_TOP_LEVEL_ENTRIES
+            );
+        }
 
         self.rmm_tools.clear();
         self.rmm_paths.clear();
@@ -454,8 +543,18 @@ impl DatasetManager {
     }
 
     fn apply_loldrivers_json(&mut self, raw: &str) -> Result<()> {
+        if raw.len() > LOLDRIVERS_MAX_BYTES {
+            bail!("LOLDrivers payload exceeded max size");
+        }
         let drivers: Vec<RawDriverEntry> =
             serde_json::from_str(raw).context("failed to parse LOLDrivers JSON")?;
+        if drivers.len() > MAX_TOP_LEVEL_ENTRIES {
+            bail!(
+                "LOLDrivers payload has too many top-level entries: {} > {}",
+                drivers.len(),
+                MAX_TOP_LEVEL_ENTRIES
+            );
+        }
 
         self.driver_hashes.clear();
         self.driver_names.clear();
@@ -635,6 +734,125 @@ struct RawGithubTreeEntry {
     kind: String,
 }
 
+fn dataset_http_client() -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder()
+        .user_agent("leash-datasets/0.1")
+        .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .read_timeout(std::time::Duration::from_secs(HTTP_READ_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(HTTP_TOTAL_TIMEOUT_SECS))
+        .build()
+        .context("failed to build dataset HTTP client")?;
+    let _ = CLIENT.set(built);
+    CLIENT
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("dataset HTTP client initialization failed"))
+}
+
+fn sanitize_url(raw: &str) -> String {
+    match reqwest::Url::parse(raw) {
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
+}
+
+fn ensure_https_url(url: &str, name: &str) -> Result<()> {
+    if !url.trim().to_ascii_lowercase().starts_with("https://") {
+        bail!("{name} URL must start with https://");
+    }
+    Ok(())
+}
+
+async fn fetch_text_with_limit(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String> {
+    ensure_https_url(url, label)?;
+    let safe_url = sanitize_url(url);
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch {label} from {safe_url}"))?
+        .error_for_status()
+        .with_context(|| format!("{label} fetch returned an error status from {safe_url}"))?;
+
+    if response.content_length().is_some_and(|len| len > max_bytes as u64) {
+        bail!(
+            "{label} response too large from {safe_url}: {} bytes > {} bytes",
+            response.content_length().unwrap_or_default(),
+            max_bytes
+        );
+    }
+
+    let body = response
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read {label} response body from {safe_url}"))?;
+    if body.len() > max_bytes {
+        bail!(
+            "{label} response too large from {safe_url}: {} bytes > {} bytes",
+            body.len(),
+            max_bytes
+        );
+    }
+    String::from_utf8(body.to_vec())
+        .with_context(|| format!("failed to decode UTF-8 body for {label} from {safe_url}"))
+}
+
+fn dataset_count_sane(old_count: usize, new_count: usize) -> bool {
+    if old_count == 0 {
+        return true;
+    }
+    let min = ((old_count as f64) * 0.10).floor() as usize;
+    let max = ((old_count as f64) * 5.0).ceil() as usize;
+    new_count >= min.max(1) && new_count <= max.max(1)
+}
+
+fn validate_yaml_depth(value: &serde_yaml::Value, max_depth: usize) -> Result<()> {
+    fn depth_of(value: &serde_yaml::Value, depth: usize, max_depth: usize) -> Result<()> {
+        if depth > max_depth {
+            bail!("YAML document exceeds max depth of {max_depth}");
+        }
+        match value {
+            serde_yaml::Value::Sequence(items) => {
+                for item in items {
+                    depth_of(item, depth + 1, max_depth)?;
+                }
+            }
+            serde_yaml::Value::Mapping(map) => {
+                for (k, v) in map {
+                    depth_of(k, depth + 1, max_depth)?;
+                    depth_of(v, depth + 1, max_depth)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    depth_of(value, 0, max_depth)
+}
+
+fn top_level_yaml_entries(value: &serde_yaml::Value) -> usize {
+    match value {
+        serde_yaml::Value::Sequence(items) => items.len(),
+        serde_yaml::Value::Mapping(map) => map.len(),
+        _ => 1,
+    }
+}
+
 fn normalize_process_name(input: &str) -> String {
     let token = input
         .trim()
@@ -740,8 +958,15 @@ fn parse_gtfobin_functions(markdown: &str) -> Result<Vec<String>> {
     let Some(front_matter) = extract_yaml_front_matter(markdown) else {
         return Ok(Vec::new());
     };
+    if front_matter.len() > GITHUB_FILE_MAX_BYTES {
+        bail!("GTFOBins front matter exceeds max size");
+    }
     let parsed: serde_yaml::Value = serde_yaml::from_str(&front_matter)
         .context("failed to parse GTFOBins front matter YAML")?;
+    validate_yaml_depth(&parsed, MAX_YAML_DEPTH)?;
+    if top_level_yaml_entries(&parsed) > MAX_TOP_LEVEL_ENTRIES {
+        bail!("GTFOBins front matter has too many top-level entries");
+    }
     let Some(functions_map) = parsed
         .get("functions")
         .and_then(serde_yaml::Value::as_mapping)
@@ -783,6 +1008,9 @@ fn extract_yaml_front_matter(markdown: &str) -> Option<String> {
 }
 
 fn parse_lot_tunnel_entries(path: &str, content: &str) -> Result<Vec<(String, TunnelToolInfo)>> {
+    if content.len() > GITHUB_FILE_MAX_BYTES {
+        bail!("LOT Tunnels content exceeds max size for {path}");
+    }
     let extension = Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -792,12 +1020,19 @@ fn parse_lot_tunnel_entries(path: &str, content: &str) -> Result<Vec<(String, Tu
         let Some(front_matter) = extract_yaml_front_matter(content) else {
             return Ok(Vec::new());
         };
+        if front_matter.len() > GITHUB_FILE_MAX_BYTES {
+            bail!("LOT Tunnels front matter exceeds max size for {path}");
+        }
         serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
             .with_context(|| format!("failed to parse YAML front matter for LOT Tunnels: {path}"))?
     } else {
         serde_yaml::from_str::<serde_yaml::Value>(content)
             .with_context(|| format!("failed to parse YAML for LOT Tunnels: {path}"))?
     };
+    validate_yaml_depth(&value, MAX_YAML_DEPTH)?;
+    if top_level_yaml_entries(&value) > MAX_TOP_LEVEL_ENTRIES {
+        bail!("LOT Tunnels YAML has too many top-level entries for {path}");
+    }
 
     let mut entries = Vec::new();
     match value {
@@ -824,6 +1059,9 @@ fn parse_lot_tunnel_entries(path: &str, content: &str) -> Result<Vec<(String, Tu
 }
 
 fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolInfo)>> {
+    if content.len() > GITHUB_FILE_MAX_BYTES {
+        bail!("LOLC2 content exceeds max size for {path}");
+    }
     let extension = Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -833,12 +1071,19 @@ fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolI
         let Some(front_matter) = extract_yaml_front_matter(content) else {
             return Ok(Vec::new());
         };
+        if front_matter.len() > GITHUB_FILE_MAX_BYTES {
+            bail!("LOLC2 front matter exceeds max size for {path}");
+        }
         serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
             .with_context(|| format!("failed to parse YAML front matter for LOLC2: {path}"))?
     } else {
         serde_yaml::from_str::<serde_yaml::Value>(content)
             .with_context(|| format!("failed to parse YAML for LOLC2: {path}"))?
     };
+    validate_yaml_depth(&value, MAX_YAML_DEPTH)?;
+    if top_level_yaml_entries(&value) > MAX_TOP_LEVEL_ENTRIES {
+        bail!("LOLC2 YAML has too many top-level entries for {path}");
+    }
 
     let mut entries = Vec::new();
     match value {
