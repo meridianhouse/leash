@@ -29,6 +29,8 @@ pub enum EventType {
     ContainerEscape,
     VaultAccess,
     PromptInjection,
+    LolRmmMatch,
+    LolDriverMatch,
 }
 
 impl std::fmt::Display for EventType {
@@ -48,6 +50,8 @@ impl std::fmt::Display for EventType {
             EventType::ContainerEscape => "container_escape",
             EventType::VaultAccess => "vault_access",
             EventType::PromptInjection => "prompt_injection",
+            EventType::LolRmmMatch => "lol_rmm_match",
+            EventType::LolDriverMatch => "lol_driver_match",
         };
         write!(f, "{text}")
     }

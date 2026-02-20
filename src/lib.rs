@@ -4,6 +4,7 @@ pub mod cli;
 pub mod collector;
 pub mod config;
 pub mod display;
+pub mod datasets;
 pub mod ebpf;
 pub mod egress;
 pub mod export;

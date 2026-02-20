@@ -1,6 +1,7 @@
 use crate::alerts::AlertDispatcher;
 use crate::collector::ProcessCollector;
 use crate::config::Config;
+use crate::datasets::DatasetManager;
 use crate::display::render_watch_ui;
 use crate::egress::EgressMonitor;
 use crate::fim::FileIntegrityMonitor;
@@ -12,6 +13,8 @@ use crate::response::ResponseEngine;
 use crate::stats;
 use crate::test_events::build_test_events;
 use crate::watchdog::Watchdog;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use nix::libc;
 use nu_ansi_term::Color;
 use std::collections::VecDeque;
@@ -383,6 +386,29 @@ pub fn stop_agent(config_path: Option<&Path>, json_output: bool) -> Result<(), D
     }
 
     let socket_path = shutdown_socket_path()?;
+    if !socket_path.exists() {
+        if stop_hash.is_empty() {
+            kill(Pid::from_raw(pid), Signal::SIGTERM)?;
+            cleanup_pid_file();
+            if json_output {
+                let value = serde_json::json!({
+                    "stopped": true,
+                    "pid": pid,
+                    "timestamp": chrono::Utc::now(),
+                    "fallback": "sigterm",
+                });
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                println!("Sent SIGTERM to Leash (PID {pid}) because shutdown socket was unavailable");
+            }
+            return Ok(());
+        }
+        return Err(format!(
+            "shutdown socket not found at {} and stop password is enabled",
+            socket_path.display()
+        )
+        .into());
+    }
     assert_socket_not_symlink(&socket_path)?;
     ensure_socket_owner(&socket_path)?;
     send_shutdown_auth_request(&socket_path, &stop_hash)?;
@@ -402,7 +428,7 @@ pub fn stop_agent(config_path: Option<&Path>, json_output: bool) -> Result<(), D
     Ok(())
 }
 
-pub fn init_config(json_output: bool) -> Result<(), DynError> {
+pub async fn init_config(json_output: bool) -> Result<(), DynError> {
     let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
     let target = PathBuf::from(home).join(".config/leash/config.yaml");
     if let Some(parent) = target.parent() {
@@ -412,15 +438,85 @@ pub fn init_config(json_output: bool) -> Result<(), DynError> {
     let template = include_str!("../config/default.yaml");
     fs::write(&target, template)?;
 
+    let cfg = Config::load(Some(&target)).unwrap_or_default();
+    let cache_dir = Path::new(&cfg.datasets.cache_dir);
+    let mut datasets = DatasetManager::load_or_default(cache_dir);
+    let mut refreshed = false;
+
+    if cfg.datasets.enabled {
+        match datasets.refresh_from_config(&cfg.datasets).await {
+            Ok(()) => {
+                refreshed = true;
+                if let Err(err) = datasets.save_cache(cache_dir) {
+                    warn!(
+                        ?err,
+                        path = %cache_dir.display(),
+                        "failed to persist datasets cache after init"
+                    );
+                }
+            }
+            Err(err) => warn!(?err, "dataset refresh failed during init"),
+        }
+    }
+
     if json_output {
         let value = serde_json::json!({
             "initialized": true,
             "path": target,
+            "datasets_refreshed": refreshed,
+            "rmm_tools_loaded": datasets.rmm_tool_count(),
+            "driver_hashes_loaded": datasets.driver_hash_count(),
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("Initialized Leash config at {}", target.display());
+        println!(
+            "Loaded {} RMM tools, {} driver hashes",
+            datasets.rmm_tool_count(),
+            datasets.driver_hash_count()
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn update_datasets(config_path: Option<&Path>, json_output: bool) -> Result<(), DynError> {
+    let cfg = Config::load(config_path)?;
+    if !cfg.datasets.enabled {
+        if json_output {
+            let value = serde_json::json!({
+                "updated": false,
+                "reason": "datasets disabled in config",
+                "timestamp": chrono::Utc::now(),
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else {
+            println!("Datasets are disabled in config. Enable datasets.enabled to refresh.");
+        }
+        return Ok(());
+    }
+
+    let mut datasets = DatasetManager::default();
+    datasets.refresh_from_config(&cfg.datasets).await?;
+    let cache_dir = Path::new(&cfg.datasets.cache_dir);
+    datasets.save_cache(cache_dir)?;
+
+    if json_output {
+        let value = serde_json::json!({
+            "updated": true,
+            "rmm_tools_loaded": datasets.rmm_tool_count(),
+            "driver_hashes_loaded": datasets.driver_hash_count(),
+            "cache_dir": cache_dir,
+            "timestamp": chrono::Utc::now(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!(
+            "Datasets updated: loaded {} RMM tools, {} driver hashes",
+            datasets.rmm_tool_count(),
+            datasets.driver_hash_count()
+        );
     }
 
     Ok(())

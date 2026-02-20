@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::datasets::{DatasetManager, compute_sha256_hex};
 use crate::mitre;
 use crate::models::{EventType, FileEvent, SecurityEvent, ThreatLevel};
 use crate::stats;
@@ -14,6 +15,7 @@ pub struct FileIntegrityMonitor {
     cfg: Config,
     tx: broadcast::Sender<SecurityEvent>,
     hashes: HashMap<String, String>,
+    datasets: Option<DatasetManager>,
 }
 
 impl FileIntegrityMonitor {
@@ -21,10 +23,28 @@ impl FileIntegrityMonitor {
         cfg: Config,
         tx: broadcast::Sender<SecurityEvent>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let datasets = if cfg.datasets.enabled {
+            let cache_dir = Path::new(&cfg.datasets.cache_dir);
+            match DatasetManager::load_cache(cache_dir) {
+                Ok(manager) => Some(manager),
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        path = %cache_dir.display(),
+                        "failed to load datasets cache; LOLDrivers file matching disabled until cache is initialized"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             cfg,
             tx,
             hashes: HashMap::new(),
+            datasets,
         })
     }
 
@@ -93,8 +113,9 @@ impl FileIntegrityMonitor {
         path: &Path,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if path.is_file() {
-            if let Some(hash) = hash_file(path) {
-                self.hashes.insert(path.display().to_string(), hash);
+            if let Some(hashes) = hash_file(path) {
+                self.hashes
+                    .insert(path.display().to_string(), hashes.blake3_hex);
             }
             return Ok(());
         }
@@ -104,8 +125,8 @@ impl FileIntegrityMonitor {
             let p = entry.path();
             if p.is_dir() {
                 let _ = self.seed_baseline(&p);
-            } else if let Some(hash) = hash_file(&p) {
-                self.hashes.insert(p.display().to_string(), hash);
+            } else if let Some(hashes) = hash_file(&p) {
+                self.hashes.insert(p.display().to_string(), hashes.blake3_hex);
             }
         }
         Ok(())
@@ -114,7 +135,8 @@ impl FileIntegrityMonitor {
     fn convert_event(&mut self, path: &Path, kind: &EventKind) -> Option<SecurityEvent> {
         let key = path.display().to_string();
         let previous = self.hashes.get(&key).cloned();
-        let current = hash_file(path);
+        let current_hashes = hash_file(path);
+        let current_blake3 = current_hashes.as_ref().map(|h| h.blake3_hex.clone());
 
         let (event_type, label, level) = match kind {
             EventKind::Create(_) => (EventType::FileCreated, "created", ThreatLevel::Yellow),
@@ -123,7 +145,7 @@ impl FileIntegrityMonitor {
             _ => return None,
         };
 
-        match &current {
+        match &current_blake3 {
             Some(hash) => {
                 self.hashes.insert(key.clone(), hash.clone());
             }
@@ -136,14 +158,14 @@ impl FileIntegrityMonitor {
             path: key.clone(),
             event_type: label.to_string(),
             old_hash: previous,
-            new_hash: current,
+            new_hash: current_blake3,
             old_perms: None,
             new_perms: path.metadata().ok().map(|m| m.permissions().mode()),
         };
 
         let mut event =
             SecurityEvent::new(event_type, level, format!("Sensitive file {label}: {key}"));
-        event.file_event = Some(file_event);
+        event.file_event = Some(file_event.clone());
 
         if matches!(kind, EventKind::Create(_) | EventKind::Modify(_))
             && let Ok(content) = fs::read_to_string(path)
@@ -159,6 +181,36 @@ impl FileIntegrityMonitor {
             }
         }
 
+        if matches!(kind, EventKind::Create(_) | EventKind::Modify(_))
+            && let (Some(datasets), Some(hashes)) = (&self.datasets, &current_hashes)
+        {
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            let driver_match = datasets
+                .check_file_hash(&hashes.sha256_hex)
+                .or_else(|| datasets.check_driver_name(filename));
+            if let Some(driver) = driver_match {
+                let mut driver_event = SecurityEvent::new(
+                    EventType::LolDriverMatch,
+                    ThreatLevel::Red,
+                    format!(
+                        "LOLDrivers vulnerable driver detected: file={} category={} reference={}",
+                        filename, driver.category, driver.reference_url
+                    ),
+                );
+                driver_event.file_event = Some(file_event.clone());
+                if let Err(err) = self.tx.send(mitre::infer_and_tag(driver_event)) {
+                    stats::record_dropped_event();
+                    warn!(
+                        event_type = %err.0.event_type,
+                        "dropping event: broadcast channel full or closed"
+                    );
+                }
+            }
+        }
+
         Some(mitre::infer_and_tag(event))
     }
 }
@@ -166,9 +218,17 @@ impl FileIntegrityMonitor {
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-fn hash_file(path: &Path) -> Option<String> {
+struct FileHashes {
+    blake3_hex: String,
+    sha256_hex: String,
+}
+
+fn hash_file(path: &Path) -> Option<FileHashes> {
     let data = fs::read(path).ok()?;
     let mut hasher = Hasher::new();
     hasher.update(&data);
-    Some(hasher.finalize().to_hex().to_string())
+    Some(FileHashes {
+        blake3_hex: hasher.finalize().to_hex().to_string(),
+        sha256_hex: compute_sha256_hex(&data),
+    })
 }

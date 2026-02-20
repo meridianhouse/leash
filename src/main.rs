@@ -6,6 +6,7 @@ mod cli;
 mod collector;
 mod config;
 mod display;
+mod datasets;
 mod ebpf;
 mod egress;
 mod export;
@@ -20,7 +21,10 @@ mod stats;
 mod test_events;
 mod watchdog;
 
-use crate::app::{init_config, init_tracing, print_status, run_agent, run_test_alerts, stop_agent};
+use crate::app::{
+    init_config, init_tracing, print_status, run_agent, run_test_alerts, stop_agent,
+    update_datasets,
+};
 use crate::cli::{AuthCommand, Cli, Commands};
 use crate::config::Config;
 use crate::ebpf::{EbpfMonitor, attach_kernel_monitor};
@@ -52,7 +56,8 @@ async fn main() -> Result<(), app::DynError> {
     }
 
     match cli.command {
-        Commands::Init => init_config(cli.json)?,
+        Commands::Init => init_config(cli.json).await?,
+        Commands::Update => update_datasets(cli.config.as_deref(), cli.json).await?,
         Commands::Start => {
             let cfg = Config::load(cli.config.as_deref())?;
             run_agent(cfg, false, cli.json, cli.dry_run).await?;

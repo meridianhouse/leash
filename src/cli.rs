@@ -28,6 +28,8 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "Initialize ~/.config/leash/config.yaml from template")]
     Init,
+    #[command(about = "Force refresh LOLRMM + LOLDrivers datasets")]
+    Update,
     #[command(about = "Start Leash daemon")]
     Start,
     #[command(about = "Start and stream detected events")]

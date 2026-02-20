@@ -11,6 +11,8 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         }
         EventType::SelfTamper => add_technique(&mut event, "T1562.001"),
         EventType::ContainerEscape => add_technique(&mut event, "T1611"),
+        EventType::LolRmmMatch => add_technique(&mut event, "T1219"),
+        EventType::LolDriverMatch => add_technique(&mut event, "T1068"),
         _ => add_technique(&mut event, "T1204"),
     }
 
@@ -275,6 +277,7 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "T1098.004" => ("Persistence", "Account Manipulation: SSH Authorized Keys"),
         "T1195.002" => ("Resource Development", "Compromise Software Supply Chain"),
         "T1219" => ("Command and Control", "Remote Access Software"),
+        "T1068" => ("Privilege Escalation", "Exploitation for Privilege Escalation"),
         "T1552" => ("Credential Access", "Unsecured Credentials"),
         "T1574.006" => (
             "Persistence",
@@ -392,5 +395,22 @@ mod tests {
         assert!(has_technique_prefix(&event, "T1574.006"));
         assert!(has_technique_prefix(&event, "T1053.003"));
         assert!(has_technique_prefix(&event, "T1098.004"));
+    }
+
+    #[test]
+    fn lol_dataset_events_map_to_expected_techniques() {
+        let rmm_event = infer_and_tag(SecurityEvent::new(
+            EventType::LolRmmMatch,
+            ThreatLevel::Red,
+            "lolrmm".into(),
+        ));
+        assert!(has_technique_prefix(&rmm_event, "T1219"));
+
+        let driver_event = infer_and_tag(SecurityEvent::new(
+            EventType::LolDriverMatch,
+            ThreatLevel::Red,
+            "loldriver".into(),
+        ));
+        assert!(has_technique_prefix(&driver_event, "T1068"));
     }
 }

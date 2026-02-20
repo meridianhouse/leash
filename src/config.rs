@@ -32,6 +32,8 @@ pub struct Config {
     pub egress: EgressConfig,
     #[serde(default)]
     pub auth: Auth,
+    #[serde(default)]
+    pub datasets: DatasetConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -136,6 +138,22 @@ pub struct Auth {
     pub stop_password_hash: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetConfig {
+    #[serde(default = "default_datasets_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_datasets_cache_dir")]
+    pub cache_dir: String,
+    #[serde(default = "default_datasets_auto_update")]
+    pub auto_update: bool,
+    #[serde(default = "default_datasets_update_interval_days")]
+    pub update_interval_days: u64,
+    #[serde(default = "default_lolrmm_url")]
+    pub lolrmm_url: String,
+    #[serde(default = "default_loldrivers_url")]
+    pub loldrivers_url: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -158,6 +176,7 @@ impl Default for Config {
             alerts: AlertsConfig::default(),
             egress: EgressConfig::default(),
             auth: Auth::default(),
+            datasets: DatasetConfig::default(),
         }
     }
 }
@@ -209,12 +228,26 @@ impl Default for EgressConfig {
     }
 }
 
+impl Default for DatasetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_datasets_enabled(),
+            cache_dir: default_datasets_cache_dir(),
+            auto_update: default_datasets_auto_update(),
+            update_interval_days: default_datasets_update_interval_days(),
+            lolrmm_url: default_lolrmm_url(),
+            loldrivers_url: default_loldrivers_url(),
+        }
+    }
+}
+
 impl Config {
     /// Parses a [`Config`] from YAML content and applies normalization/validation.
     pub fn from_yaml_str(raw: &str) -> Result<Self> {
         let mut cfg: Self = serde_yaml::from_str(raw).context("invalid YAML")?;
 
         cfg.alerts.json_log.path = expand_tilde(&cfg.alerts.json_log.path);
+        cfg.datasets.cache_dir = expand_tilde(&cfg.datasets.cache_dir);
         cfg.fim_paths = cfg
             .fim_paths
             .into_iter()
@@ -254,6 +287,19 @@ impl Config {
                 "monitor_interval_ms must be at least 100 (got {})",
                 self.monitor_interval_ms
             ));
+        }
+        if self.datasets.update_interval_days == 0 {
+            errors.push("datasets.update_interval_days must be at least 1".to_string());
+        }
+        for (name, url) in [
+            ("datasets.lolrmm_url", self.datasets.lolrmm_url.trim()),
+            ("datasets.loldrivers_url", self.datasets.loldrivers_url.trim()),
+        ] {
+            if !url.is_empty() && !is_valid_http_or_https_url(url) {
+                errors.push(format!(
+                    "{name} must start with http:// or https:// (got '{url}')"
+                ));
+            }
         }
 
         validate_level(&self.alerts.min_severity, "alerts.min_severity")?;
@@ -506,6 +552,30 @@ fn default_suspicious_country_ip_prefixes() -> Vec<String> {
     Vec::new()
 }
 
+fn default_datasets_enabled() -> bool {
+    true
+}
+
+fn default_datasets_cache_dir() -> String {
+    "~/.config/leash/datasets".into()
+}
+
+fn default_datasets_auto_update() -> bool {
+    true
+}
+
+fn default_datasets_update_interval_days() -> u64 {
+    7
+}
+
+fn default_lolrmm_url() -> String {
+    "https://lolrmm.io/api/rmm_tools.json".into()
+}
+
+fn default_loldrivers_url() -> String {
+    "https://www.loldrivers.io/api/drivers.json".into()
+}
+
 fn default_config_path() -> PathBuf {
     trusted_home_dir()
         .map(|home| home.join(".config/leash/config.yaml"))
@@ -661,6 +731,8 @@ mod tests {
                 .iter()
                 .any(|item| item.eq_ignore_ascii_case("codex"))
         );
+        assert!(parsed.datasets.enabled);
+        assert_eq!(parsed.datasets.update_interval_days, 7);
     }
 
     #[test]
@@ -704,6 +776,13 @@ egress:
   suspicious_country_ip_prefixes: [203.0.113.]
 auth:
   stop_password_hash: 9f86d081884c7d659a2feaa0c55ad015
+datasets:
+  enabled: true
+  cache_dir: ~/.config/leash/datasets
+  auto_update: true
+  update_interval_days: 7
+  lolrmm_url: https://lolrmm.io/api/rmm_tools.json
+  loldrivers_url: https://www.loldrivers.io/api/drivers.json
 "#;
 
         let parsed: Config = serde_yaml::from_str(yaml).expect("all-fields config should parse");
@@ -726,6 +805,9 @@ auth:
             parsed.auth.stop_password_hash,
             "9f86d081884c7d659a2feaa0c55ad015"
         );
+        assert!(parsed.datasets.enabled);
+        assert!(parsed.datasets.auto_update);
+        assert_eq!(parsed.datasets.update_interval_days, 7);
     }
 
     #[test]

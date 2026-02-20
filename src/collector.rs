@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::datasets::DatasetManager;
 use crate::mitre;
 use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, ThreatLevel};
 use crate::stats;
@@ -25,16 +26,35 @@ pub struct ProcessCollector {
     tx: broadcast::Sender<SecurityEvent>,
     prev_processes: HashMap<i32, Option<u64>>,
     process_tree: HashMap<i32, Vec<i32>>,
+    datasets: Option<DatasetManager>,
 }
 
 impl ProcessCollector {
     /// Builds a process collector that publishes inferred [`SecurityEvent`] values over a broadcast channel.
     pub fn new(cfg: Config, tx: broadcast::Sender<SecurityEvent>) -> Self {
+        let datasets = if cfg.datasets.enabled {
+            let cache_dir = Path::new(&cfg.datasets.cache_dir);
+            match DatasetManager::load_cache(cache_dir) {
+                Ok(manager) => Some(manager),
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        path = %cache_dir.display(),
+                        "failed to load datasets cache; LOLRMM process matching disabled until cache is initialized"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             cfg,
             tx,
             prev_processes: HashMap::new(),
             process_tree: HashMap::new(),
+            datasets,
         }
     }
 
@@ -194,6 +214,30 @@ impl ProcessCollector {
             snapshot,
             all,
         ));
+
+        if let Some(datasets) = &self.datasets {
+            let maybe_match = datasets
+                .check_process_name(&snapshot.info.name)
+                .or_else(|| {
+                    Path::new(&snapshot.info.exe)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| datasets.check_process_name(name))
+                });
+
+            if let Some(tool) = maybe_match {
+                events.push(self.make_event(
+                    EventType::LolRmmMatch,
+                    ThreatLevel::Red,
+                    format!(
+                        "LOLRMM tool execution match: {} (process={}) | reference: {}",
+                        tool.name, snapshot.info.name, tool.reference_url
+                    ),
+                    snapshot,
+                    all,
+                ));
+            }
+        }
 
         let lower_name = snapshot.info.name.to_ascii_lowercase();
         if is_descendant && ["bash", "sh", "zsh"].contains(&lower_name.as_str()) {
@@ -1467,8 +1511,11 @@ pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
+    use super::ProcessEnrichment;
+    use super::ProcessInfo;
+    use super::ProcessSnapshot;
     use super::ProcessCollector;
     use super::detect_dangerous_commands;
     use super::detect_dangerous_commands_with_context;
@@ -1476,7 +1523,8 @@ mod tests {
     use super::jittered_scan_interval;
     use super::scrub_secrets;
     use crate::config::Config;
-    use crate::models::SecurityEvent;
+    use crate::datasets::{DatasetManager, RmmToolInfo};
+    use crate::models::{EventType, SecurityEvent};
     use tokio::sync::broadcast;
 
     fn collector() -> ProcessCollector {
@@ -1955,5 +2003,82 @@ mod tests {
         assert!(!output.contains("AKIAABCDEFGHIJKLMNOP"));
         assert!(!output.contains("api_key=abc123"));
         assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn emits_lolrmm_match_event_for_matching_process_name() {
+        let mut collector = collector();
+        let mut datasets = DatasetManager::default();
+        datasets.rmm_tools.insert(
+            "anydesk".to_string(),
+            RmmToolInfo {
+                name: "AnyDesk".to_string(),
+                description: "Remote desktop".to_string(),
+                reference_url: "https://lolrmm.io/".to_string(),
+                installation_paths: vec![],
+            },
+        );
+        collector.datasets = Some(datasets);
+
+        let root = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 100,
+                ppid: 1,
+                name: "codex".to_string(),
+                cmdline: "codex run".to_string(),
+                exe: "/usr/bin/codex".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "codex run".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: true,
+            start_ticks: Some(1),
+        };
+        let child = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 101,
+                ppid: 100,
+                name: "anydesk".to_string(),
+                cmdline: "anydesk --service".to_string(),
+                exe: "/usr/bin/anydesk".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "anydesk --service".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: false,
+            start_ticks: Some(2),
+        };
+
+        let mut all = HashMap::new();
+        all.insert(100, root);
+        all.insert(101, child.clone());
+
+        let ai_roots = HashSet::from([100]);
+        let events = collector.analyze_monitored_process(101, &child, &all, &ai_roots);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::LolRmmMatch)
+        );
     }
 }

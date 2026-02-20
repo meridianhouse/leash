@@ -151,3 +151,11 @@ egress:
     - transfer.sh
     - file.io
   suspicious_country_ip_prefixes: []
+
+datasets:
+  enabled: true
+  cache_dir: ~/.config/leash/datasets
+  auto_update: true
+  update_interval_days: 7
+  lolrmm_url: https://lolrmm.io/api/rmm_tools.json
+  loldrivers_url: https://www.loldrivers.io/api/drivers.json
