@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::datasets::{DatasetManager, GtfobinInfo};
+use crate::datasets::{DatasetManager, GtfobinInfo, TunnelToolInfo};
 use crate::mitre;
 use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, ThreatLevel};
 use crate::stats;
@@ -258,6 +258,37 @@ impl ProcessCollector {
                     format!(
                         "GTFOBins capability match: {} (process={}) | capabilities: {} | reference: {}",
                         gtfobin.name, snapshot.info.name, capabilities, reference
+                    ),
+                    snapshot,
+                    all,
+                ));
+            }
+
+            let maybe_tunnel = datasets
+                .check_tunnel_tool(&snapshot.info.name)
+                .or_else(|| {
+                    Path::new(&snapshot.info.exe)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| datasets.check_tunnel_tool(name))
+                });
+
+            if let Some(tunnel) = maybe_tunnel.filter(|info| has_dangerous_tunnel_capabilities(info))
+            {
+                let capabilities = if tunnel.capabilities.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    tunnel.capabilities.join(", ")
+                };
+                events.push(self.make_event(
+                    EventType::LotTunnelMatch,
+                    ThreatLevel::Orange,
+                    format!(
+                        "LOT Tunnels tool execution match: {} (process={}) | capabilities: {} | reference: {}",
+                        tunnel.name,
+                        snapshot.info.name,
+                        capabilities,
+                        lot_tunnels_url(&tunnel.name)
                     ),
                     snapshot,
                     all,
@@ -1526,6 +1557,31 @@ fn gtfobin_url(name: &str) -> String {
     )
 }
 
+fn has_dangerous_tunnel_capabilities(info: &TunnelToolInfo) -> bool {
+    if info.capabilities.is_empty() {
+        return true;
+    }
+
+    info.capabilities.iter().any(|capability| {
+        capability.contains("c2")
+            || capability.contains("command")
+            || capability.contains("control")
+            || capability.contains("exfil")
+            || capability.contains("reverse")
+            || capability.contains("shell")
+            || capability.contains("persistence")
+            || capability.contains("proxy")
+            || capability.contains("tunnel")
+    })
+}
+
+fn lot_tunnels_url(name: &str) -> String {
+    format!(
+        "https://lottunnels.github.io/tunnels/{}/",
+        name.trim().to_ascii_lowercase()
+    )
+}
+
 /// Returns true when an allow-list entry matches a process name, command token, or executable path.
 pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe: &str) -> bool {
     let needle = entry_name.trim().to_ascii_lowercase();
@@ -1565,7 +1621,7 @@ mod tests {
     use super::jittered_scan_interval;
     use super::scrub_secrets;
     use crate::config::Config;
-    use crate::datasets::{DatasetManager, GtfobinInfo, RmmToolInfo};
+    use crate::datasets::{DatasetManager, GtfobinInfo, RmmToolInfo, TunnelToolInfo};
     use crate::models::{EventType, SecurityEvent};
     use tokio::sync::broadcast;
 
@@ -2196,6 +2252,82 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.event_type == EventType::GtfobinMatch)
+        );
+    }
+
+    #[test]
+    fn emits_lot_tunnel_match_for_known_tunnel_tool() {
+        let mut collector = collector();
+        let mut datasets = DatasetManager::default();
+        datasets.tunnels.insert(
+            "ngrok".to_string(),
+            TunnelToolInfo {
+                name: "ngrok".to_string(),
+                description: "Public tunnel service".to_string(),
+                capabilities: vec!["c2".to_string(), "exfiltration".to_string()],
+            },
+        );
+        collector.datasets = Some(datasets);
+
+        let root = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 100,
+                ppid: 1,
+                name: "codex".to_string(),
+                cmdline: "codex run".to_string(),
+                exe: "/usr/bin/codex".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "codex run".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: true,
+            start_ticks: Some(1),
+        };
+        let child = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 101,
+                ppid: 100,
+                name: "ngrok".to_string(),
+                cmdline: "ngrok tcp 22".to_string(),
+                exe: "/usr/bin/ngrok".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "ngrok tcp 22".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: false,
+            start_ticks: Some(2),
+        };
+
+        let mut all = HashMap::new();
+        all.insert(100, root);
+        all.insert(101, child.clone());
+
+        let ai_roots = HashSet::from([100]);
+        let events = collector.analyze_monitored_process(101, &child, &all, &ai_roots);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::LotTunnelMatch)
         );
     }
 }

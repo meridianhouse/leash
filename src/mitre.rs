@@ -14,6 +14,7 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         EventType::LolRmmMatch => add_technique(&mut event, "T1219"),
         EventType::LolDriverMatch => add_technique(&mut event, "T1068"),
         EventType::GtfobinMatch => add_technique(&mut event, "T1548"),
+        EventType::LotTunnelMatch => add_technique(&mut event, "T1572"),
         _ => add_technique(&mut event, "T1204"),
     }
 
@@ -256,6 +257,7 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         ),
         "T1071" => ("Command and Control", "Application Layer Protocol"),
         "T1048" => ("Exfiltration", "Exfiltration Over Alternative Protocol"),
+        "T1572" => ("Command and Control", "Protocol Tunneling"),
         "T1547.001" => (
             "Persistence",
             "Boot/Logon Autostart: systemd or cron modification",
@@ -421,5 +423,12 @@ mod tests {
             "gtfobin".into(),
         ));
         assert!(has_technique_prefix(&gtfobin_event, "T1548"));
+
+        let tunnel_event = infer_and_tag(SecurityEvent::new(
+            EventType::LotTunnelMatch,
+            ThreatLevel::Orange,
+            "lot tunnel".into(),
+        ));
+        assert!(has_technique_prefix(&tunnel_event, "T1572"));
     }
 }

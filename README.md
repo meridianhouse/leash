@@ -227,6 +227,7 @@ Requirements: Rust 1.75+, Linux (x86_64 or aarch64)
 - [ ] v0.2 — LOLRMM integration (flag known abused RMM tools via [lolrmm.io](https://lolrmm.io) dataset)
 - [ ] v0.2 — LOLDrivers integration (detect vulnerable/malicious drivers via [loldrivers.io](https://www.loldrivers.io) dataset)
 - [x] v0.2 — GTFOBins integration (flag risky Unix binary abuse capabilities via [gtfobins.github.io](https://gtfobins.github.io))
+- [x] v0.2 — LOT Tunnels integration (flag living-off-tunnels tooling via [lottunnels.github.io](https://lottunnels.github.io))
 - [ ] v0.3 — Anti-tamper watchdog with mutual process monitoring
 - [ ] v0.4 — Web dashboard for historical analysis
 - [ ] v1.0 — macOS support

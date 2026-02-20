@@ -10,6 +10,10 @@ const GTFOBINS_TREE_URL: &str =
     "https://api.github.com/repos/GTFOBins/GTFOBins.github.io/git/trees/master?recursive=1";
 const GTFOBINS_RAW_BASE_URL: &str =
     "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master";
+const LOT_TUNNELS_TREE_URL: &str =
+    "https://api.github.com/repos/lottunnels/lottunnels.github.io/git/trees/main?recursive=1";
+const LOT_TUNNELS_RAW_BASE_URL: &str =
+    "https://raw.githubusercontent.com/lottunnels/lottunnels.github.io/main";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RmmToolInfo {
@@ -35,6 +39,13 @@ pub struct GtfobinInfo {
     pub functions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TunnelToolInfo {
+    pub name: String,
+    pub description: String,
+    pub capabilities: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetManager {
     pub rmm_tools: HashMap<String, RmmToolInfo>,
@@ -43,6 +54,8 @@ pub struct DatasetManager {
     pub driver_names: HashMap<String, DriverInfo>,
     #[serde(default)]
     pub gtfobins: HashMap<String, GtfobinInfo>,
+    #[serde(default)]
+    pub tunnels: HashMap<String, TunnelToolInfo>,
     pub last_updated: DateTime<Utc>,
 }
 
@@ -54,6 +67,7 @@ impl Default for DatasetManager {
             driver_hashes: HashSet::new(),
             driver_names: HashMap::new(),
             gtfobins: HashMap::new(),
+            tunnels: HashMap::new(),
             last_updated: Utc::now(),
         }
     }
@@ -88,6 +102,11 @@ impl DatasetManager {
     pub fn check_gtfobin(&self, name: &str) -> Option<&GtfobinInfo> {
         let normalized = normalize_process_name(name);
         self.gtfobins.get(&normalized)
+    }
+
+    pub fn check_tunnel_tool(&self, name: &str) -> Option<&TunnelToolInfo> {
+        let normalized = normalize_process_name(name);
+        self.tunnels.get(&normalized)
     }
 
     pub fn save_cache(&self, cache_dir: &Path) -> Result<()> {
@@ -138,6 +157,7 @@ impl DatasetManager {
         self.fetch_lolrmm(&cfg.lolrmm_url).await?;
         self.fetch_loldrivers(&cfg.loldrivers_url).await?;
         self.fetch_gtfobins().await?;
+        self.fetch_lot_tunnels().await?;
         self.last_updated = Utc::now();
         Ok(())
     }
@@ -156,6 +176,10 @@ impl DatasetManager {
 
     pub fn gtfobin_count(&self) -> usize {
         self.gtfobins.len()
+    }
+
+    pub fn tunnel_tool_count(&self) -> usize {
+        self.tunnels.len()
     }
 
     pub async fn fetch_gtfobins(&mut self) -> Result<()> {
@@ -219,6 +243,61 @@ impl DatasetManager {
         }
 
         self.gtfobins = index;
+        Ok(())
+    }
+
+    pub async fn fetch_lot_tunnels(&mut self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .user_agent("leash-datasets/0.1")
+            .build()
+            .context("failed to build HTTP client for LOT Tunnels fetch")?;
+
+        let tree_raw = client
+            .get(LOT_TUNNELS_TREE_URL)
+            .send()
+            .await
+            .with_context(|| {
+                format!("failed to fetch LOT Tunnels tree from {LOT_TUNNELS_TREE_URL}")
+            })?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "LOT Tunnels tree fetch returned an error status from {LOT_TUNNELS_TREE_URL}"
+                )
+            })?
+            .text()
+            .await
+            .context("failed to read LOT Tunnels tree response body")?;
+
+        let tree: RawGithubTree =
+            serde_json::from_str(&tree_raw).context("failed to parse LOT Tunnels tree JSON")?;
+        let mut index = HashMap::new();
+
+        for entry in tree.tree {
+            if entry.kind != "blob" || !is_lot_tunnel_data_path(&entry.path) {
+                continue;
+            }
+
+            let raw_url = format!("{LOT_TUNNELS_RAW_BASE_URL}/{}", entry.path);
+            let content = client
+                .get(&raw_url)
+                .send()
+                .await
+                .with_context(|| format!("failed to fetch LOT Tunnels entry from {raw_url}"))?
+                .error_for_status()
+                .with_context(|| {
+                    format!("LOT Tunnels entry fetch returned an error status from {raw_url}")
+                })?
+                .text()
+                .await
+                .with_context(|| format!("failed to read LOT Tunnels entry body from {raw_url}"))?;
+
+            for (key, info) in parse_lot_tunnel_entries(&entry.path, &content)? {
+                index.insert(key, info);
+            }
+        }
+
+        self.tunnels = index;
         Ok(())
     }
 
@@ -463,6 +542,29 @@ fn is_gtfobin_markdown_path(path: &str) -> bool {
     })
 }
 
+fn is_lot_tunnel_data_path(path: &str) -> bool {
+    let parsed = Path::new(path);
+    let Some(extension) = parsed.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    if !matches!(extension, "md" | "yml" | "yaml") {
+        return false;
+    }
+
+    parsed.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|segment| {
+                segment.eq_ignore_ascii_case("_tunnels")
+                    || segment.eq_ignore_ascii_case("tunnels")
+                    || segment.eq_ignore_ascii_case("_data")
+                    || segment.eq_ignore_ascii_case("data")
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn parse_gtfobin_functions(markdown: &str) -> Result<Vec<String>> {
     let Some(front_matter) = extract_yaml_front_matter(markdown) else {
         return Ok(Vec::new());
@@ -504,6 +606,176 @@ fn extract_yaml_front_matter(markdown: &str) -> Option<String> {
     }
 
     None
+}
+
+fn parse_lot_tunnel_entries(path: &str, content: &str) -> Result<Vec<(String, TunnelToolInfo)>> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
+
+    let value = if extension == "md" {
+        let Some(front_matter) = extract_yaml_front_matter(content) else {
+            return Ok(Vec::new());
+        };
+        serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
+            .with_context(|| format!("failed to parse YAML front matter for LOT Tunnels: {path}"))?
+    } else {
+        serde_yaml::from_str::<serde_yaml::Value>(content)
+            .with_context(|| format!("failed to parse YAML for LOT Tunnels: {path}"))?
+    };
+
+    let mut entries = Vec::new();
+    match value {
+        serde_yaml::Value::Sequence(items) => {
+            for item in items {
+                if let Some((keys, info)) = build_lot_tunnel_info(path, &item) {
+                    for key in keys {
+                        entries.push((key, info.clone()));
+                    }
+                }
+            }
+        }
+        serde_yaml::Value::Mapping(_) => {
+            if let Some((keys, info)) = build_lot_tunnel_info(path, &value) {
+                for key in keys {
+                    entries.push((key, info.clone()));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(entries)
+}
+
+fn build_lot_tunnel_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<String>, TunnelToolInfo)> {
+    let name = yaml_string_for_keys(
+        value,
+        &["name", "title", "tool", "binary", "process", "command", "slug"],
+    )
+    .or_else(|| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+    })?;
+
+    let description = yaml_string_for_keys(value, &["description", "summary", "about"]).unwrap_or_default();
+
+    let mut capabilities = yaml_string_vec_for_keys(
+        value,
+        &["capabilities", "tags", "use_cases", "uses", "features", "techniques"],
+    );
+    if capabilities.is_empty() {
+        for key in ["capabilities", "uses", "usage", "functions", "categories"] {
+            if let Some(serde_yaml::Value::Mapping(mapping)) = yaml_value_for_key(value, key) {
+                for map_key in mapping.keys() {
+                    if let Some(text) = map_key.as_str() {
+                        let normalized = normalize_capability_token(text);
+                        if !normalized.is_empty() {
+                            capabilities.push(normalized);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    capabilities.sort();
+    capabilities.dedup();
+
+    let mut keys = vec![normalize_process_name(&name)];
+    keys.extend(yaml_string_vec_for_keys(
+        value,
+        &["binary", "binaries", "process", "processes", "command", "commands", "aliases", "alias"],
+    ));
+    keys = keys
+        .into_iter()
+        .map(|item| normalize_process_name(&item))
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return None;
+    }
+
+    Some((
+        keys,
+        TunnelToolInfo {
+            name,
+            description,
+            capabilities,
+        },
+    ))
+}
+
+fn yaml_string_for_keys(value: &serde_yaml::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| yaml_value_for_key(value, key))
+        .and_then(yaml_value_as_string)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+fn yaml_string_vec_for_keys(value: &serde_yaml::Value, keys: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in keys {
+        if let Some(found) = yaml_value_for_key(value, key) {
+            out.extend(yaml_value_as_string_vec(found));
+        }
+    }
+    out.into_iter()
+        .map(|item| normalize_capability_token(&item))
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn normalize_capability_token(input: &str) -> String {
+    input
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase()
+}
+
+fn yaml_value_for_key<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
+    let serde_yaml::Value::Mapping(map) = value else {
+        return None;
+    };
+    let direct_key = serde_yaml::Value::String(key.to_string());
+    map.get(&direct_key).or_else(|| {
+        map.iter().find_map(|(map_key, map_value)| {
+            map_key
+                .as_str()
+                .filter(|candidate| candidate.eq_ignore_ascii_case(key))
+                .map(|_| map_value)
+        })
+    })
+}
+
+fn yaml_value_as_string(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(text) => Some(text.to_string()),
+        serde_yaml::Value::Number(number) => Some(number.to_string()),
+        serde_yaml::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn yaml_value_as_string_vec(value: &serde_yaml::Value) -> Vec<String> {
+    match value {
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .filter_map(yaml_value_as_string)
+            .collect::<Vec<_>>(),
+        serde_yaml::Value::Mapping(map) => map
+            .keys()
+            .filter_map(serde_yaml::Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        _ => yaml_value_as_string(value).into_iter().collect(),
+    }
 }
 
 pub fn compute_sha256_hex(bytes: &[u8]) -> String {
@@ -761,6 +1033,51 @@ body
             .check_gtfobin("Python")
             .expect("python should be indexed");
         assert!(python.functions.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn parses_lot_tunnel_front_matter_entry() {
+        let sample = r#"---
+name: ngrok
+description: Expose local services to the Internet.
+capabilities:
+  - c2
+  - reverse shell
+binaries:
+  - ngrok
+---
+# ngrok
+"#;
+
+        let parsed = parse_lot_tunnel_entries("_tunnels/ngrok.md", sample)
+            .expect("LOT Tunnels sample should parse");
+        assert!(!parsed.is_empty());
+        let info = parsed
+            .iter()
+            .find_map(|(key, info)| (key == "ngrok").then_some(info))
+            .expect("ngrok key should exist");
+        assert_eq!(info.name, "ngrok");
+        assert!(info.capabilities.iter().any(|cap| cap == "c2"));
+    }
+
+    #[test]
+    fn check_tunnel_tool_matches_common_names() {
+        let mut manager = DatasetManager::default();
+        for name in ["ngrok", "cloudflared", "chisel"] {
+            manager.tunnels.insert(
+                name.to_string(),
+                TunnelToolInfo {
+                    name: name.to_string(),
+                    description: "Tunnel utility".to_string(),
+                    capabilities: vec!["c2".to_string(), "exfiltration".to_string()],
+                },
+            );
+        }
+
+        assert!(manager.check_tunnel_tool("ngrok").is_some());
+        assert!(manager.check_tunnel_tool("cloudflared").is_some());
+        assert!(manager.check_tunnel_tool("chisel").is_some());
+        assert!(manager.check_tunnel_tool("CHISEL.EXE").is_some());
     }
 
     #[test]

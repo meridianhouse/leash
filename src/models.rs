@@ -32,6 +32,7 @@ pub enum EventType {
     LolRmmMatch,
     LolDriverMatch,
     GtfobinMatch,
+    LotTunnelMatch,
 }
 
 impl std::fmt::Display for EventType {
@@ -54,6 +55,7 @@ impl std::fmt::Display for EventType {
             EventType::LolRmmMatch => "lol_rmm_match",
             EventType::LolDriverMatch => "lol_driver_match",
             EventType::GtfobinMatch => "gtfobin_match",
+            EventType::LotTunnelMatch => "lot_tunnel_match",
         };
         write!(f, "{text}")
     }

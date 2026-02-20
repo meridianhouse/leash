@@ -28,7 +28,7 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "Initialize ~/.config/leash/config.yaml from template")]
     Init,
-    #[command(about = "Force refresh LOLRMM + LOLDrivers datasets")]
+    #[command(about = "Force refresh LOLRMM + LOLDrivers + GTFOBins + LOT Tunnels datasets")]
     Update,
     #[command(about = "Start Leash daemon")]
     Start,
