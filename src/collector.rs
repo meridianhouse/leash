@@ -371,7 +371,10 @@ impl ProcessCollector {
         let parent_is_known_ai_agent = parent
             .map(|p| self.is_ai_agent(&p.info.name, &p.info.cmdline, &p.info.exe))
             .unwrap_or(false);
-        let root_pid = ancestry.first().map(|(ancestor_pid, _)| *ancestor_pid).unwrap_or(pid);
+        let root_pid = ancestry
+            .first()
+            .map(|(ancestor_pid, _)| *ancestor_pid)
+            .unwrap_or(pid);
         let gated_hits = dangerous_hits
             .into_iter()
             .filter(|rule| {
@@ -380,7 +383,11 @@ impl ProcessCollector {
                     DetectionContext {
                         is_allow_listed: false,
                         parent_is_known_ai_agent,
-                        ld_preload: snapshot.enrichment.env.get("LD_PRELOAD").map(String::as_str),
+                        ld_preload: snapshot
+                            .enrichment
+                            .env
+                            .get("LD_PRELOAD")
+                            .map(String::as_str),
                     },
                 )
             })
@@ -2386,7 +2393,10 @@ mod tests {
     #[test]
     fn ignores_ld_preload_in_standard_library_dirs() {
         let mut env = HashMap::new();
-        env.insert("LD_PRELOAD".to_string(), "/usr/lib/libsafe.so:/lib/libc.so".to_string());
+        env.insert(
+            "LD_PRELOAD".to_string(),
+            "/usr/lib/libsafe.so:/lib/libc.so".to_string(),
+        );
         let hits = detect_dangerous_commands_with_context(
             "/usr/bin/ls",
             "/tmp",

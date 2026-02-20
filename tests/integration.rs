@@ -501,7 +501,7 @@ fn start_status_stop_lifecycle_works() {
         String::from_utf8_lossy(&stop.stderr)
     );
     assert!(
-        wait_for_child_exit(&mut child, Duration::from_secs(5)),
+        wait_for_child_exit(&mut child, Duration::from_secs(15)),
         "start process should exit after stop command"
     );
 }

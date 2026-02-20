@@ -299,9 +299,7 @@ impl Config {
             ),
         ] {
             if !url.is_empty() && !is_valid_https_url(url) {
-                errors.push(format!(
-                    "{name} must start with https:// (got '{url}')"
-                ));
+                errors.push(format!("{name} must start with https:// (got '{url}')"));
             }
         }
 

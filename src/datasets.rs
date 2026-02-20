@@ -1,7 +1,9 @@
 use crate::config::DatasetConfig;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
+use flate2::read::GzDecoder;
 use nix::libc;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -9,28 +11,24 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use tar::Archive;
 use tracing::{info, warn};
 
-const GTFOBINS_TREE_URL: &str =
-    "https://api.github.com/repos/GTFOBins/GTFOBins.github.io/git/trees/master?recursive=1";
-const GTFOBINS_RAW_BASE_URL: &str =
-    "https://raw.githubusercontent.com/GTFOBins/GTFOBins.github.io/master";
-const LOT_TUNNELS_TREE_URL: &str =
-    "https://api.github.com/repos/lottunnels/lottunnels.github.io/git/trees/main?recursive=1";
-const LOT_TUNNELS_RAW_BASE_URL: &str =
-    "https://raw.githubusercontent.com/lottunnels/lottunnels.github.io/main";
-const LOLC2_TREE_URL: &str =
-    "https://api.github.com/repos/lolc2/lolc2.github.io/git/trees/main?recursive=1";
-const LOLC2_RAW_BASE_URL: &str = "https://raw.githubusercontent.com/lolc2/lolc2.github.io/main";
+const GTFOBINS_TARBALL_URL: &str =
+    "https://api.github.com/repos/GTFOBins/GTFOBins.github.io/tarball/master";
+const LOT_TUNNELS_TARBALL_URL: &str =
+    "https://api.github.com/repos/lottunnels/lottunnels.github.io/tarball/main";
+const LOLC2_TARBALL_URL: &str = "https://api.github.com/repos/lolc2/lolc2.github.io/tarball/main";
 
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
 const HTTP_READ_TIMEOUT_SECS: u64 = 30;
 const HTTP_TOTAL_TIMEOUT_SECS: u64 = 60;
 const LOLRMM_MAX_BYTES: usize = 5 * 1024 * 1024;
 const LOLDRIVERS_MAX_BYTES: usize = 50 * 1024 * 1024;
-const GITHUB_TREE_MAX_BYTES: usize = 5 * 1024 * 1024;
+const GITHUB_TARBALL_MAX_BYTES: usize = 20 * 1024 * 1024;
+const GITHUB_TARBALL_EXTRACTED_MAX_BYTES: usize = 50 * 1024 * 1024;
 const GITHUB_FILE_MAX_BYTES: usize = 1024 * 1024;
-const MAX_GITHUB_TREE_ENTRIES: usize = 1000;
+const MAX_GITHUB_TARBALL_FILES: usize = 2000;
 const MAX_TOP_LEVEL_ENTRIES: usize = 10_000;
 const MAX_YAML_DEPTH: usize = 64;
 const CACHE_DIR_MODE: u32 = 0o700;
@@ -249,7 +247,10 @@ impl DatasetManager {
             );
             return Ok(());
         }
-        info!(dataset = "lolrmm", old_count, new_count, "dataset refresh stats");
+        info!(
+            dataset = "lolrmm",
+            old_count, new_count, "dataset refresh stats"
+        );
         self.rmm_tools = candidate.rmm_tools;
         self.rmm_paths = candidate.rmm_paths;
         Ok(())
@@ -272,7 +273,10 @@ impl DatasetManager {
             );
             return Ok(());
         }
-        info!(dataset = "loldrivers", old_count, new_count, "dataset refresh stats");
+        info!(
+            dataset = "loldrivers",
+            old_count, new_count, "dataset refresh stats"
+        );
         self.driver_hashes = candidate.driver_hashes;
         self.driver_names = candidate.driver_names;
         Ok(())
@@ -316,36 +320,21 @@ impl DatasetManager {
 
     pub async fn fetch_gtfobins(&mut self) -> Result<()> {
         let client = dataset_http_client()?;
-
-        let tree_raw =
-            fetch_text_with_limit(&client, GTFOBINS_TREE_URL, GITHUB_TREE_MAX_BYTES, "GTFOBins tree")
-                .await?;
-
-        let tree: RawGithubTree =
-            serde_json::from_str(&tree_raw).context("failed to parse GTFOBins tree JSON")?;
+        let files =
+            fetch_github_tarball(client, GTFOBINS_TARBALL_URL, GITHUB_TARBALL_MAX_BYTES).await?;
         let mut index = HashMap::new();
 
-        for entry in tree
-            .tree
+        for (path, markdown) in files
             .into_iter()
-            .filter(|entry| entry.kind == "blob" && is_gtfobin_markdown_path(&entry.path))
-            .take(MAX_GITHUB_TREE_ENTRIES)
+            .filter(|(path, _)| path.contains("_gtfobins/") && path.ends_with(".md"))
         {
-            let Some(stem) = Path::new(&entry.path)
-                .file_stem()
-                .and_then(|name| name.to_str())
-            else {
+            let Some(stem) = Path::new(&path).file_stem().and_then(|name| name.to_str()) else {
                 continue;
             };
             let normalized = normalize_process_name(stem);
             if normalized.is_empty() {
                 continue;
             }
-
-            let raw_url = format!("{GTFOBINS_RAW_BASE_URL}/{}", entry.path);
-            let markdown =
-                fetch_text_with_limit(&client, &raw_url, GITHUB_FILE_MAX_BYTES, "GTFOBins markdown")
-                    .await?;
 
             let functions = parse_gtfobin_functions(&markdown).unwrap_or_default();
             index.insert(
@@ -368,34 +357,25 @@ impl DatasetManager {
             );
             return Ok(());
         }
-        info!(dataset = "gtfobins", old_count, new_count, "dataset refresh stats");
+        info!(
+            dataset = "gtfobins",
+            old_count, new_count, "dataset refresh stats"
+        );
         self.gtfobins = index;
         Ok(())
     }
 
     pub async fn fetch_lot_tunnels(&mut self) -> Result<()> {
         let client = dataset_http_client()?;
-
-        let tree_raw =
-            fetch_text_with_limit(&client, LOT_TUNNELS_TREE_URL, GITHUB_TREE_MAX_BYTES, "LOT Tunnels tree")
-                .await?;
-
-        let tree: RawGithubTree =
-            serde_json::from_str(&tree_raw).context("failed to parse LOT Tunnels tree JSON")?;
+        let files =
+            fetch_github_tarball(client, LOT_TUNNELS_TARBALL_URL, GITHUB_TARBALL_MAX_BYTES).await?;
         let mut index = HashMap::new();
 
-        for entry in tree
-            .tree
+        for (path, content) in files
             .into_iter()
-            .filter(|entry| entry.kind == "blob" && is_lot_tunnel_data_path(&entry.path))
-            .take(MAX_GITHUB_TREE_ENTRIES)
+            .filter(|(path, _)| is_lot_tunnel_data_path(path))
         {
-            let raw_url = format!("{LOT_TUNNELS_RAW_BASE_URL}/{}", entry.path);
-            let content =
-                fetch_text_with_limit(&client, &raw_url, GITHUB_FILE_MAX_BYTES, "LOT Tunnels entry")
-                    .await?;
-
-            for (key, info) in parse_lot_tunnel_entries(&entry.path, &content)? {
+            for (key, info) in parse_lot_tunnel_entries(&path, &content)? {
                 index.insert(key, info);
             }
         }
@@ -411,34 +391,25 @@ impl DatasetManager {
             );
             return Ok(());
         }
-        info!(dataset = "lot_tunnels", old_count, new_count, "dataset refresh stats");
+        info!(
+            dataset = "lot_tunnels",
+            old_count, new_count, "dataset refresh stats"
+        );
         self.tunnels = index;
         Ok(())
     }
 
     pub async fn fetch_lolc2(&mut self) -> Result<()> {
         let client = dataset_http_client()?;
-
-        let tree_raw =
-            fetch_text_with_limit(&client, LOLC2_TREE_URL, GITHUB_TREE_MAX_BYTES, "LOLC2 tree")
-                .await?;
-
-        let tree: RawGithubTree =
-            serde_json::from_str(&tree_raw).context("failed to parse LOLC2 tree JSON")?;
+        let files =
+            fetch_github_tarball(client, LOLC2_TARBALL_URL, GITHUB_TARBALL_MAX_BYTES).await?;
         let mut index = HashMap::new();
 
-        for entry in tree
-            .tree
+        for (path, content) in files
             .into_iter()
-            .filter(|entry| entry.kind == "blob" && is_lolc2_data_path(&entry.path))
-            .take(MAX_GITHUB_TREE_ENTRIES)
+            .filter(|(path, _)| is_lolc2_data_path(path))
         {
-            let raw_url = format!("{LOLC2_RAW_BASE_URL}/{}", entry.path);
-            let content =
-                fetch_text_with_limit(&client, &raw_url, GITHUB_FILE_MAX_BYTES, "LOLC2 entry")
-                    .await?;
-
-            for (key, info) in parse_lolc2_entries(&entry.path, &content)? {
+            for (key, info) in parse_lolc2_entries(&path, &content)? {
                 index.insert(key, info);
             }
         }
@@ -454,7 +425,10 @@ impl DatasetManager {
             );
             return Ok(());
         }
-        info!(dataset = "lolc2", old_count, new_count, "dataset refresh stats");
+        info!(
+            dataset = "lolc2",
+            old_count, new_count, "dataset refresh stats"
+        );
         self.c2_tools = index;
         Ok(())
     }
@@ -630,9 +604,17 @@ struct RawRmmTool {
 
 #[derive(Debug, Deserialize, Default)]
 struct RawRmmDetails {
-    #[serde(rename = "PEMetadata", default, deserialize_with = "deserialize_pe_metadata")]
+    #[serde(
+        rename = "PEMetadata",
+        default,
+        deserialize_with = "deserialize_pe_metadata"
+    )]
     pe_metadata: Vec<RawPeMetadata>,
-    #[serde(rename = "InstallationPaths", default, deserialize_with = "deserialize_nullable_strings")]
+    #[serde(
+        rename = "InstallationPaths",
+        default,
+        deserialize_with = "deserialize_nullable_strings"
+    )]
     installation_paths: Vec<String>,
 }
 
@@ -642,16 +624,19 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
-        serde_json::Value::Array(arr) => {
-            Ok(arr.into_iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        }
+        serde_json::Value::Array(arr) => Ok(arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()),
         serde_json::Value::String(s) => Ok(vec![s]),
         serde_json::Value::Null => Ok(Vec::new()),
         _ => Ok(Vec::new()),
     }
 }
 
-fn deserialize_nullable_strings<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+fn deserialize_nullable_strings<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -659,7 +644,9 @@ where
     Ok(value.unwrap_or_default())
 }
 
-fn deserialize_pe_metadata<'de, D>(deserializer: D) -> std::result::Result<Vec<RawPeMetadata>, D::Error>
+fn deserialize_pe_metadata<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<RawPeMetadata>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -675,14 +662,14 @@ where
             }
             Ok(result)
         }
-        serde_json::Value::Object(_) => {
-            match serde_json::from_value::<RawPeMetadata>(value) {
-                Ok(pe) => Ok(vec![pe]),
-                Err(_) => Ok(Vec::new()),
-            }
-        }
+        serde_json::Value::Object(_) => match serde_json::from_value::<RawPeMetadata>(value) {
+            Ok(pe) => Ok(vec![pe]),
+            Err(_) => Ok(Vec::new()),
+        },
         serde_json::Value::Null => Ok(Vec::new()),
-        _ => Err(de::Error::custom("expected array, object, or null for PEMetadata")),
+        _ => Err(de::Error::custom(
+            "expected array, object, or null for PEMetadata",
+        )),
     }
 }
 
@@ -702,7 +689,11 @@ struct RawDriverEntry {
     id: String,
     #[serde(rename = "Category", default)]
     category: String,
-    #[serde(rename = "CVE", default, deserialize_with = "deserialize_string_or_vec")]
+    #[serde(
+        rename = "CVE",
+        default,
+        deserialize_with = "deserialize_string_or_vec"
+    )]
     cve: Vec<String>,
     #[serde(rename = "Tags", default)]
     tags: Vec<String>,
@@ -718,20 +709,6 @@ struct RawDriverSample {
     sha256: String,
     #[serde(rename = "OriginalFilename", default)]
     original_filename: String,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct RawGithubTree {
-    #[serde(default)]
-    tree: Vec<RawGithubTreeEntry>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct RawGithubTreeEntry {
-    #[serde(default)]
-    path: String,
-    #[serde(rename = "type", default)]
-    kind: String,
 }
 
 fn dataset_http_client() -> Result<&'static reqwest::Client> {
@@ -772,6 +749,123 @@ fn ensure_https_url(url: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_github_tarball(
+    client: &Client,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Vec<(String, String)>> {
+    ensure_https_url(url, "GitHub tarball")?;
+    let safe_url = sanitize_url(url);
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch GitHub tarball from {safe_url}"))?
+        .error_for_status()
+        .with_context(|| {
+            format!("GitHub tarball fetch returned an error status from {safe_url}")
+        })?;
+
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_bytes as u64)
+    {
+        bail!(
+            "GitHub tarball too large from {safe_url}: {} bytes > {} bytes",
+            response.content_length().unwrap_or_default(),
+            max_bytes
+        );
+    }
+
+    let body = response
+        .bytes()
+        .await
+        .with_context(|| format!("failed to read GitHub tarball body from {safe_url}"))?;
+    if body.len() > max_bytes {
+        bail!(
+            "GitHub tarball too large from {safe_url}: {} bytes > {} bytes",
+            body.len(),
+            max_bytes
+        );
+    }
+
+    let mut files = Vec::new();
+    let mut extracted_bytes = 0usize;
+    let decoder = GzDecoder::new(std::io::Cursor::new(body));
+    let mut archive = Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .with_context(|| format!("failed to read tarball entries from {safe_url}"))?;
+
+    for entry in entries {
+        let mut entry =
+            entry.with_context(|| format!("failed to read a tarball entry from {safe_url}"))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+
+        let path = entry
+            .path()
+            .context("failed to parse tarball entry path")?
+            .to_string_lossy()
+            .into_owned();
+        let extension = Path::new(&path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase());
+        if !matches!(extension.as_deref(), Some("md" | "yml" | "yaml")) {
+            continue;
+        }
+
+        if files.len() >= MAX_GITHUB_TARBALL_FILES {
+            bail!(
+                "GitHub tarball contains too many candidate files: {} >= {}",
+                files.len(),
+                MAX_GITHUB_TARBALL_FILES
+            );
+        }
+
+        if entry.size() > GITHUB_FILE_MAX_BYTES as u64 {
+            bail!(
+                "GitHub tarball file exceeds max size for {path}: {} bytes > {} bytes",
+                entry.size(),
+                GITHUB_FILE_MAX_BYTES
+            );
+        }
+
+        let mut raw = Vec::new();
+        entry
+            .by_ref()
+            .take((GITHUB_FILE_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut raw)
+            .with_context(|| format!("failed to read tarball file content for {path}"))?;
+        if raw.len() > GITHUB_FILE_MAX_BYTES {
+            bail!(
+                "GitHub tarball file exceeds max size for {path}: {} bytes > {} bytes",
+                raw.len(),
+                GITHUB_FILE_MAX_BYTES
+            );
+        }
+
+        extracted_bytes = extracted_bytes
+            .checked_add(raw.len())
+            .ok_or_else(|| anyhow::anyhow!("GitHub tarball extracted size overflow"))?;
+        if extracted_bytes > GITHUB_TARBALL_EXTRACTED_MAX_BYTES {
+            bail!(
+                "GitHub tarball extracted content too large: {} bytes > {} bytes",
+                extracted_bytes,
+                GITHUB_TARBALL_EXTRACTED_MAX_BYTES
+            );
+        }
+
+        let content = String::from_utf8(raw)
+            .with_context(|| format!("failed to decode UTF-8 tarball file content for {path}"))?;
+        files.push((path, content));
+    }
+
+    Ok(files)
+}
+
 async fn fetch_text_with_limit(
     client: &reqwest::Client,
     url: &str,
@@ -788,7 +882,10 @@ async fn fetch_text_with_limit(
         .error_for_status()
         .with_context(|| format!("{label} fetch returned an error status from {safe_url}"))?;
 
-    if response.content_length().is_some_and(|len| len > max_bytes as u64) {
+    if response
+        .content_length()
+        .is_some_and(|len| len > max_bytes as u64)
+    {
         bail!(
             "{label} response too large from {safe_url}: {} bytes > {} bytes",
             response.content_length().unwrap_or_default(),
@@ -882,21 +979,6 @@ fn normalize_filename(input: &str) -> String {
 
 fn normalize_sha256(input: &str) -> String {
     input.trim().to_ascii_lowercase()
-}
-
-fn is_gtfobin_markdown_path(path: &str) -> bool {
-    let path = Path::new(path);
-    if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-        return false;
-    }
-
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .map(|segment| segment == "_gtfobins")
-            .unwrap_or(false)
-    })
 }
 
 fn is_lot_tunnel_data_path(path: &str) -> bool {

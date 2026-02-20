@@ -35,6 +35,8 @@ rand = "0.9.2"
 aya = "0.13"
 aya-log = "0.2"
 bytes = "1"
+flate2 = "1"
+tar = "0.4"
 
 [dependencies]
 tokio.workspace = true
@@ -56,6 +58,8 @@ rand.workspace = true
 aya.workspace = true
 aya-log.workspace = true
 bytes.workspace = true
+flate2.workspace = true
+tar.workspace = true
 nu-ansi-term = "0.50.3"
 anyhow = { path = "third_party/anyhow" }
 
