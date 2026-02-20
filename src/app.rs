@@ -13,9 +13,9 @@ use crate::response::ResponseEngine;
 use crate::stats;
 use crate::test_events::build_test_events;
 use crate::watchdog::Watchdog;
+use nix::libc;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use nix::libc;
 use nu_ansi_term::Color;
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
@@ -399,7 +399,9 @@ pub fn stop_agent(config_path: Option<&Path>, json_output: bool) -> Result<(), D
                 });
                 println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
-                println!("Sent SIGTERM to Leash (PID {pid}) because shutdown socket was unavailable");
+                println!(
+                    "Sent SIGTERM to Leash (PID {pid}) because shutdown socket was unavailable"
+                );
             }
             return Ok(());
         }
@@ -468,24 +470,29 @@ pub async fn init_config(json_output: bool) -> Result<(), DynError> {
             "driver_hashes_loaded": datasets.driver_hash_count(),
             "gtfobins_loaded": datasets.gtfobin_count(),
             "lot_tunnels_loaded": datasets.tunnel_tool_count(),
+            "lolc2_tools_loaded": datasets.c2_tool_count(),
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!("Initialized Leash config at {}", target.display());
         println!(
-            "Loaded {} RMM tools, {} driver hashes, {} GTFOBins, {} LOT tunnel tools",
+            "Loaded {} RMM tools, {} driver hashes, {} GTFOBins, {} LOT tunnel tools, {} LOLC2 tools",
             datasets.rmm_tool_count(),
             datasets.driver_hash_count(),
             datasets.gtfobin_count(),
-            datasets.tunnel_tool_count()
+            datasets.tunnel_tool_count(),
+            datasets.c2_tool_count()
         );
     }
 
     Ok(())
 }
 
-pub async fn update_datasets(config_path: Option<&Path>, json_output: bool) -> Result<(), DynError> {
+pub async fn update_datasets(
+    config_path: Option<&Path>,
+    json_output: bool,
+) -> Result<(), DynError> {
     let cfg = Config::load(config_path)?;
     if !cfg.datasets.enabled {
         if json_output {
@@ -513,17 +520,19 @@ pub async fn update_datasets(config_path: Option<&Path>, json_output: bool) -> R
             "driver_hashes_loaded": datasets.driver_hash_count(),
             "gtfobins_loaded": datasets.gtfobin_count(),
             "lot_tunnels_loaded": datasets.tunnel_tool_count(),
+            "lolc2_tools_loaded": datasets.c2_tool_count(),
             "cache_dir": cache_dir,
             "timestamp": chrono::Utc::now(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         println!(
-            "Datasets updated: loaded {} RMM tools, {} driver hashes, {} GTFOBins, {} LOT tunnel tools",
+            "Datasets updated: loaded {} RMM tools, {} driver hashes, {} GTFOBins, {} LOT tunnel tools, {} LOLC2 tools",
             datasets.rmm_tool_count(),
             datasets.driver_hash_count(),
             datasets.gtfobin_count(),
-            datasets.tunnel_tool_count()
+            datasets.tunnel_tool_count(),
+            datasets.c2_tool_count()
         );
     }
 

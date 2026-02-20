@@ -293,7 +293,10 @@ impl Config {
         }
         for (name, url) in [
             ("datasets.lolrmm_url", self.datasets.lolrmm_url.trim()),
-            ("datasets.loldrivers_url", self.datasets.loldrivers_url.trim()),
+            (
+                "datasets.loldrivers_url",
+                self.datasets.loldrivers_url.trim(),
+            ),
         ] {
             if !url.is_empty() && !is_valid_http_or_https_url(url) {
                 errors.push(format!(

@@ -126,7 +126,8 @@ impl FileIntegrityMonitor {
             if p.is_dir() {
                 let _ = self.seed_baseline(&p);
             } else if let Some(hashes) = hash_file(&p) {
-                self.hashes.insert(p.display().to_string(), hashes.blake3_hex);
+                self.hashes
+                    .insert(p.display().to_string(), hashes.blake3_hex);
             }
         }
         Ok(())

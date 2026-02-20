@@ -14,6 +14,9 @@ const LOT_TUNNELS_TREE_URL: &str =
     "https://api.github.com/repos/lottunnels/lottunnels.github.io/git/trees/main?recursive=1";
 const LOT_TUNNELS_RAW_BASE_URL: &str =
     "https://raw.githubusercontent.com/lottunnels/lottunnels.github.io/main";
+const LOLC2_TREE_URL: &str =
+    "https://api.github.com/repos/lolc2/lolc2.github.io/git/trees/main?recursive=1";
+const LOLC2_RAW_BASE_URL: &str = "https://raw.githubusercontent.com/lolc2/lolc2.github.io/main";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RmmToolInfo {
@@ -46,6 +49,14 @@ pub struct TunnelToolInfo {
     pub capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct C2ToolInfo {
+    pub name: String,
+    pub description: String,
+    pub abused_services: Vec<String>,
+    pub reference_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetManager {
     pub rmm_tools: HashMap<String, RmmToolInfo>,
@@ -56,6 +67,8 @@ pub struct DatasetManager {
     pub gtfobins: HashMap<String, GtfobinInfo>,
     #[serde(default)]
     pub tunnels: HashMap<String, TunnelToolInfo>,
+    #[serde(default)]
+    pub c2_tools: HashMap<String, C2ToolInfo>,
     pub last_updated: DateTime<Utc>,
 }
 
@@ -68,6 +81,7 @@ impl Default for DatasetManager {
             driver_names: HashMap::new(),
             gtfobins: HashMap::new(),
             tunnels: HashMap::new(),
+            c2_tools: HashMap::new(),
             last_updated: Utc::now(),
         }
     }
@@ -109,9 +123,15 @@ impl DatasetManager {
         self.tunnels.get(&normalized)
     }
 
+    pub fn check_c2_tool(&self, name: &str) -> Option<&C2ToolInfo> {
+        let normalized = normalize_process_name(name);
+        self.c2_tools.get(&normalized)
+    }
+
     pub fn save_cache(&self, cache_dir: &Path) -> Result<()> {
-        fs::create_dir_all(cache_dir)
-            .with_context(|| format!("failed to create dataset cache dir {}", cache_dir.display()))?;
+        fs::create_dir_all(cache_dir).with_context(|| {
+            format!("failed to create dataset cache dir {}", cache_dir.display())
+        })?;
 
         let data = serde_json::to_vec(self).context("failed to serialize datasets")?;
         let target = cache_dir.join("datasets.json");
@@ -158,6 +178,7 @@ impl DatasetManager {
         self.fetch_loldrivers(&cfg.loldrivers_url).await?;
         self.fetch_gtfobins().await?;
         self.fetch_lot_tunnels().await?;
+        self.fetch_lolc2().await?;
         self.last_updated = Utc::now();
         Ok(())
     }
@@ -180,6 +201,10 @@ impl DatasetManager {
 
     pub fn tunnel_tool_count(&self) -> usize {
         self.tunnels.len()
+    }
+
+    pub fn c2_tool_count(&self) -> usize {
+        self.c2_tools.len()
     }
 
     pub async fn fetch_gtfobins(&mut self) -> Result<()> {
@@ -210,7 +235,10 @@ impl DatasetManager {
                 continue;
             }
 
-            let Some(stem) = Path::new(&entry.path).file_stem().and_then(|name| name.to_str()) else {
+            let Some(stem) = Path::new(&entry.path)
+                .file_stem()
+                .and_then(|name| name.to_str())
+            else {
                 continue;
             };
             let normalized = normalize_process_name(stem);
@@ -301,8 +329,60 @@ impl DatasetManager {
         Ok(())
     }
 
+    pub async fn fetch_lolc2(&mut self) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .user_agent("leash-datasets/0.1")
+            .build()
+            .context("failed to build HTTP client for LOLC2 fetch")?;
+
+        let tree_raw = client
+            .get(LOLC2_TREE_URL)
+            .send()
+            .await
+            .with_context(|| format!("failed to fetch LOLC2 tree from {LOLC2_TREE_URL}"))?
+            .error_for_status()
+            .with_context(|| {
+                format!("LOLC2 tree fetch returned an error status from {LOLC2_TREE_URL}")
+            })?
+            .text()
+            .await
+            .context("failed to read LOLC2 tree response body")?;
+
+        let tree: RawGithubTree =
+            serde_json::from_str(&tree_raw).context("failed to parse LOLC2 tree JSON")?;
+        let mut index = HashMap::new();
+
+        for entry in tree.tree {
+            if entry.kind != "blob" || !is_lolc2_data_path(&entry.path) {
+                continue;
+            }
+
+            let raw_url = format!("{LOLC2_RAW_BASE_URL}/{}", entry.path);
+            let content = client
+                .get(&raw_url)
+                .send()
+                .await
+                .with_context(|| format!("failed to fetch LOLC2 entry from {raw_url}"))?
+                .error_for_status()
+                .with_context(|| {
+                    format!("LOLC2 entry fetch returned an error status from {raw_url}")
+                })?
+                .text()
+                .await
+                .with_context(|| format!("failed to read LOLC2 entry body from {raw_url}"))?;
+
+            for (key, info) in parse_lolc2_entries(&entry.path, &content)? {
+                index.insert(key, info);
+            }
+        }
+
+        self.c2_tools = index;
+        Ok(())
+    }
+
     fn apply_lolrmm_json(&mut self, raw: &str) -> Result<()> {
-        let tools: Vec<RawRmmTool> = serde_json::from_str(raw).context("failed to parse LOLRMM JSON")?;
+        let tools: Vec<RawRmmTool> =
+            serde_json::from_str(raw).context("failed to parse LOLRMM JSON")?;
 
         self.rmm_tools.clear();
         self.rmm_paths.clear();
@@ -320,13 +400,22 @@ impl DatasetManager {
                 .cloned()
                 .unwrap_or_else(|| "https://lolrmm.io/".to_string());
 
-            for path in tool.details.installation_paths.iter().filter(|s| !s.trim().is_empty()) {
+            for path in tool
+                .details
+                .installation_paths
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+            {
                 self.rmm_paths.push((path.to_string(), tool_name.clone()));
             }
 
             let mut process_names = HashSet::new();
             for metadata in tool.details.pe_metadata {
-                for candidate in [metadata.filename, metadata.original_file_name, metadata.internal_name] {
+                for candidate in [
+                    metadata.filename,
+                    metadata.original_file_name,
+                    metadata.internal_name,
+                ] {
                     let normalized = normalize_process_name(&candidate);
                     if !normalized.is_empty() {
                         process_names.insert(normalized);
@@ -565,13 +654,48 @@ fn is_lot_tunnel_data_path(path: &str) -> bool {
     })
 }
 
+fn is_lolc2_data_path(path: &str) -> bool {
+    let parsed = Path::new(path);
+    let Some(extension) = parsed.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    if !matches!(extension, "md" | "yml" | "yaml") {
+        return false;
+    }
+
+    let lower_path = path.to_ascii_lowercase();
+    if !lower_path.contains("c2") && !lower_path.contains("framework") {
+        return false;
+    }
+
+    parsed.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|segment| {
+                segment.eq_ignore_ascii_case("_c2")
+                    || segment.eq_ignore_ascii_case("c2")
+                    || segment.eq_ignore_ascii_case("_frameworks")
+                    || segment.eq_ignore_ascii_case("frameworks")
+                    || segment.eq_ignore_ascii_case("_data")
+                    || segment.eq_ignore_ascii_case("data")
+                    || segment.eq_ignore_ascii_case("_posts")
+                    || segment.eq_ignore_ascii_case("posts")
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn parse_gtfobin_functions(markdown: &str) -> Result<Vec<String>> {
     let Some(front_matter) = extract_yaml_front_matter(markdown) else {
         return Ok(Vec::new());
     };
-    let parsed: serde_yaml::Value =
-        serde_yaml::from_str(&front_matter).context("failed to parse GTFOBins front matter YAML")?;
-    let Some(functions_map) = parsed.get("functions").and_then(serde_yaml::Value::as_mapping) else {
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&front_matter)
+        .context("failed to parse GTFOBins front matter YAML")?;
+    let Some(functions_map) = parsed
+        .get("functions")
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
         return Ok(Vec::new());
     };
 
@@ -649,10 +773,56 @@ fn parse_lot_tunnel_entries(path: &str, content: &str) -> Result<Vec<(String, Tu
     Ok(entries)
 }
 
-fn build_lot_tunnel_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<String>, TunnelToolInfo)> {
+fn parse_lolc2_entries(path: &str, content: &str) -> Result<Vec<(String, C2ToolInfo)>> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
+
+    let value = if extension == "md" {
+        let Some(front_matter) = extract_yaml_front_matter(content) else {
+            return Ok(Vec::new());
+        };
+        serde_yaml::from_str::<serde_yaml::Value>(&front_matter)
+            .with_context(|| format!("failed to parse YAML front matter for LOLC2: {path}"))?
+    } else {
+        serde_yaml::from_str::<serde_yaml::Value>(content)
+            .with_context(|| format!("failed to parse YAML for LOLC2: {path}"))?
+    };
+
+    let mut entries = Vec::new();
+    match value {
+        serde_yaml::Value::Sequence(items) => {
+            for item in items {
+                if let Some((keys, info)) = build_lolc2_info(path, &item) {
+                    for key in keys {
+                        entries.push((key, info.clone()));
+                    }
+                }
+            }
+        }
+        serde_yaml::Value::Mapping(_) => {
+            if let Some((keys, info)) = build_lolc2_info(path, &value) {
+                for key in keys {
+                    entries.push((key, info.clone()));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(entries)
+}
+
+fn build_lot_tunnel_info(
+    path: &str,
+    value: &serde_yaml::Value,
+) -> Option<(Vec<String>, TunnelToolInfo)> {
     let name = yaml_string_for_keys(
         value,
-        &["name", "title", "tool", "binary", "process", "command", "slug"],
+        &[
+            "name", "title", "tool", "binary", "process", "command", "slug",
+        ],
     )
     .or_else(|| {
         Path::new(path)
@@ -661,11 +831,19 @@ fn build_lot_tunnel_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<S
             .map(str::to_string)
     })?;
 
-    let description = yaml_string_for_keys(value, &["description", "summary", "about"]).unwrap_or_default();
+    let description =
+        yaml_string_for_keys(value, &["description", "summary", "about"]).unwrap_or_default();
 
     let mut capabilities = yaml_string_vec_for_keys(
         value,
-        &["capabilities", "tags", "use_cases", "uses", "features", "techniques"],
+        &[
+            "capabilities",
+            "tags",
+            "use_cases",
+            "uses",
+            "features",
+            "techniques",
+        ],
     );
     if capabilities.is_empty() {
         for key in ["capabilities", "uses", "usage", "functions", "categories"] {
@@ -687,7 +865,16 @@ fn build_lot_tunnel_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<S
     let mut keys = vec![normalize_process_name(&name)];
     keys.extend(yaml_string_vec_for_keys(
         value,
-        &["binary", "binaries", "process", "processes", "command", "commands", "aliases", "alias"],
+        &[
+            "binary",
+            "binaries",
+            "process",
+            "processes",
+            "command",
+            "commands",
+            "aliases",
+            "alias",
+        ],
     ));
     keys = keys
         .into_iter()
@@ -706,6 +893,123 @@ fn build_lot_tunnel_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<S
             name,
             description,
             capabilities,
+        },
+    ))
+}
+
+fn build_lolc2_info(path: &str, value: &serde_yaml::Value) -> Option<(Vec<String>, C2ToolInfo)> {
+    let name = yaml_string_for_keys(
+        value,
+        &[
+            "name",
+            "title",
+            "tool",
+            "binary",
+            "framework",
+            "project",
+            "slug",
+        ],
+    )
+    .or_else(|| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string)
+    })?;
+
+    let description =
+        yaml_string_for_keys(value, &["description", "summary", "about"]).unwrap_or_default();
+
+    let mut abused_services = yaml_string_vec_for_keys(
+        value,
+        &[
+            "abused_services",
+            "legitimate_services",
+            "services",
+            "service",
+            "platforms",
+            "channels",
+            "transports",
+            "communication",
+            "comms",
+            "tags",
+        ],
+    );
+    if abused_services.is_empty() {
+        for key in [
+            "abused_services",
+            "services",
+            "service",
+            "platforms",
+            "channels",
+        ] {
+            if let Some(serde_yaml::Value::Mapping(mapping)) = yaml_value_for_key(value, key) {
+                for map_key in mapping.keys() {
+                    if let Some(text) = map_key.as_str() {
+                        let normalized = normalize_capability_token(text);
+                        if !normalized.is_empty() {
+                            abused_services.push(normalized);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    abused_services.sort();
+    abused_services.dedup();
+
+    let mut reference_candidates = yaml_string_vec_for_keys(
+        value,
+        &[
+            "reference",
+            "references",
+            "reference_url",
+            "url",
+            "urls",
+            "website",
+            "source",
+            "repo",
+            "github",
+        ],
+    );
+    let reference_url = reference_candidates
+        .drain(..)
+        .find(|candidate| candidate.starts_with("http://") || candidate.starts_with("https://"))
+        .unwrap_or_else(|| format!("https://github.com/lolc2/lolc2.github.io/blob/main/{path}"));
+
+    let mut keys = vec![normalize_process_name(&name)];
+    keys.extend(yaml_string_vec_for_keys(
+        value,
+        &[
+            "binary",
+            "binaries",
+            "process",
+            "processes",
+            "command",
+            "commands",
+            "aliases",
+            "alias",
+            "tool",
+        ],
+    ));
+    keys = keys
+        .into_iter()
+        .map(|item| normalize_process_name(&item))
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        return None;
+    }
+
+    Some((
+        keys,
+        C2ToolInfo {
+            name,
+            description,
+            abused_services,
+            reference_url,
         },
     ))
 }
@@ -739,7 +1043,10 @@ fn normalize_capability_token(input: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn yaml_value_for_key<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_yaml::Value> {
+fn yaml_value_for_key<'a>(
+    value: &'a serde_yaml::Value,
+    key: &str,
+) -> Option<&'a serde_yaml::Value> {
     let serde_yaml::Value::Mapping(map) = value else {
         return None;
     };
@@ -793,13 +1100,7 @@ pub fn compute_sha256_hex(bytes: &[u8]) -> String {
     ];
 
     let mut h: [u32; 8] = [
-        0x6a09e667,
-        0xbb67ae85,
-        0x3c6ef372,
-        0xa54ff53a,
-        0x510e527f,
-        0x9b05688c,
-        0x1f83d9ab,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
 
@@ -823,10 +1124,12 @@ pub fn compute_sha256_hex(bytes: &[u8]) -> String {
             ]);
         }
         for index in 16..64 {
-            let s0 =
-                w[index - 15].rotate_right(7) ^ w[index - 15].rotate_right(18) ^ (w[index - 15] >> 3);
-            let s1 =
-                w[index - 2].rotate_right(17) ^ w[index - 2].rotate_right(19) ^ (w[index - 2] >> 10);
+            let s0 = w[index - 15].rotate_right(7)
+                ^ w[index - 15].rotate_right(18)
+                ^ (w[index - 15] >> 3);
+            let s1 = w[index - 2].rotate_right(17)
+                ^ w[index - 2].rotate_right(19)
+                ^ (w[index - 2] >> 10);
             w[index] = w[index - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[index - 7])
@@ -942,9 +1245,11 @@ mod tests {
             .expect("sample loldrivers json should parse");
 
         assert_eq!(manager.driver_hash_count(), 1);
-        assert!(manager
-            .check_file_hash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_some());
+        assert!(
+            manager
+                .check_file_hash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_some()
+        );
         assert!(manager.check_driver_name("bad.sys").is_some());
     }
 
@@ -1078,6 +1383,57 @@ binaries:
         assert!(manager.check_tunnel_tool("cloudflared").is_some());
         assert!(manager.check_tunnel_tool("chisel").is_some());
         assert!(manager.check_tunnel_tool("CHISEL.EXE").is_some());
+    }
+
+    #[test]
+    fn parses_lolc2_front_matter_entry() {
+        let sample = r#"---
+name: sliver
+description: C2 framework that can leverage common SaaS channels.
+abused_services:
+  - discord
+  - slack
+binaries:
+  - sliver-server
+reference_url: https://lolc2.github.io/#/tool?id=sliver
+---
+content
+"#;
+
+        let parsed =
+            parse_lolc2_entries("c2/sliver.md", sample).expect("LOLC2 sample should parse");
+        assert!(!parsed.is_empty());
+        let info = parsed
+            .iter()
+            .find_map(|(key, info)| (key == "sliver-server").then_some(info))
+            .expect("sliver-server key should exist");
+        assert_eq!(info.name, "sliver");
+        assert!(
+            info.abused_services
+                .iter()
+                .any(|service| service == "discord")
+        );
+        assert_eq!(
+            info.reference_url,
+            "https://lolc2.github.io/#/tool?id=sliver"
+        );
+    }
+
+    #[test]
+    fn check_c2_tool_matches_common_names() {
+        let mut manager = DatasetManager::default();
+        manager.c2_tools.insert(
+            "sliver".to_string(),
+            C2ToolInfo {
+                name: "sliver".to_string(),
+                description: "C2 framework".to_string(),
+                abused_services: vec!["discord".to_string(), "slack".to_string()],
+                reference_url: "https://lolc2.github.io/".to_string(),
+            },
+        );
+
+        assert!(manager.check_c2_tool("sliver").is_some());
+        assert!(manager.check_c2_tool("SLIVER.EXE").is_some());
     }
 
     #[test]

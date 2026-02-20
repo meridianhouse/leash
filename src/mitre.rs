@@ -15,6 +15,7 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         EventType::LolDriverMatch => add_technique(&mut event, "T1068"),
         EventType::GtfobinMatch => add_technique(&mut event, "T1548"),
         EventType::LotTunnelMatch => add_technique(&mut event, "T1572"),
+        EventType::LolC2Match => add_technique(&mut event, "T1102"),
         _ => add_technique(&mut event, "T1204"),
     }
 
@@ -64,6 +65,22 @@ pub fn infer_and_tag(mut event: SecurityEvent) -> SecurityEvent {
         || (combined.contains("wget ") && combined.contains("| sh"))
     {
         add_technique(&mut event, "T1105");
+    }
+
+    if combined.contains("vscode_tunnel_agent") {
+        add_technique(&mut event, "T1572");
+    }
+
+    if combined.contains("llm_model_download") {
+        add_technique(&mut event, "T1105");
+    }
+
+    if combined.contains("cloud_api_c2") {
+        add_technique(&mut event, "T1102");
+    }
+
+    if combined.contains("tempdir_installer_abuse") {
+        add_technique(&mut event, "T1218");
     }
 
     if combined.contains("base64 -d")
@@ -258,6 +275,7 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "T1071" => ("Command and Control", "Application Layer Protocol"),
         "T1048" => ("Exfiltration", "Exfiltration Over Alternative Protocol"),
         "T1572" => ("Command and Control", "Protocol Tunneling"),
+        "T1102" => ("Command and Control", "Web Service"),
         "T1547.001" => (
             "Persistence",
             "Boot/Logon Autostart: systemd or cron modification",
@@ -279,8 +297,12 @@ fn lookup(technique_id: &str) -> Option<MitreMapping> {
         "T1053.003" => ("Execution", "Scheduled Task/Job: Cron"),
         "T1098.004" => ("Persistence", "Account Manipulation: SSH Authorized Keys"),
         "T1195.002" => ("Resource Development", "Compromise Software Supply Chain"),
+        "T1218" => ("Defense Evasion", "System Binary Proxy Execution"),
         "T1219" => ("Command and Control", "Remote Access Software"),
-        "T1068" => ("Privilege Escalation", "Exploitation for Privilege Escalation"),
+        "T1068" => (
+            "Privilege Escalation",
+            "Exploitation for Privilege Escalation",
+        ),
         "T1548" => ("Privilege Escalation", "Abuse Elevation Control Mechanism"),
         "T1552" => ("Credential Access", "Unsecured Credentials"),
         "T1574.006" => (
@@ -430,5 +452,12 @@ mod tests {
             "lot tunnel".into(),
         ));
         assert!(has_technique_prefix(&tunnel_event, "T1572"));
+
+        let lolc2_event = infer_and_tag(SecurityEvent::new(
+            EventType::LolC2Match,
+            ThreatLevel::Red,
+            "lolc2".into(),
+        ));
+        assert!(has_technique_prefix(&lolc2_event, "T1102"));
     }
 }

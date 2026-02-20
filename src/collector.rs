@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::datasets::{DatasetManager, GtfobinInfo, TunnelToolInfo};
+use crate::datasets::{C2ToolInfo, DatasetManager, GtfobinInfo, TunnelToolInfo};
 use crate::mitre;
 use crate::models::{EventType, ProcessEnrichment, ProcessInfo, SecurityEvent, ThreatLevel};
 use crate::stats;
@@ -40,7 +40,7 @@ impl ProcessCollector {
                     warn!(
                         ?err,
                         path = %cache_dir.display(),
-                        "failed to load datasets cache; dataset matching (LOLRMM/LOLDrivers/GTFOBins) disabled until cache is initialized"
+                        "failed to load datasets cache; dataset matching (LOLRMM/LOLDrivers/GTFOBins/LOT Tunnels/LOLC2) disabled until cache is initialized"
                     );
                     None
                 }
@@ -238,14 +238,12 @@ impl ProcessCollector {
                 ));
             }
 
-            let maybe_gtfobin = datasets
-                .check_gtfobin(&snapshot.info.name)
-                .or_else(|| {
-                    Path::new(&snapshot.info.exe)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .and_then(|name| datasets.check_gtfobin(name))
-                });
+            let maybe_gtfobin = datasets.check_gtfobin(&snapshot.info.name).or_else(|| {
+                Path::new(&snapshot.info.exe)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| datasets.check_gtfobin(name))
+            });
 
             if let Some(gtfobin) =
                 maybe_gtfobin.filter(|info| has_dangerous_gtfobin_capabilities(info))
@@ -264,16 +262,15 @@ impl ProcessCollector {
                 ));
             }
 
-            let maybe_tunnel = datasets
-                .check_tunnel_tool(&snapshot.info.name)
-                .or_else(|| {
-                    Path::new(&snapshot.info.exe)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .and_then(|name| datasets.check_tunnel_tool(name))
-                });
+            let maybe_tunnel = datasets.check_tunnel_tool(&snapshot.info.name).or_else(|| {
+                Path::new(&snapshot.info.exe)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| datasets.check_tunnel_tool(name))
+            });
 
-            if let Some(tunnel) = maybe_tunnel.filter(|info| has_dangerous_tunnel_capabilities(info))
+            if let Some(tunnel) =
+                maybe_tunnel.filter(|info| has_dangerous_tunnel_capabilities(info))
             {
                 let capabilities = if tunnel.capabilities.is_empty() {
                     "unknown".to_string()
@@ -289,6 +286,31 @@ impl ProcessCollector {
                         snapshot.info.name,
                         capabilities,
                         lot_tunnels_url(&tunnel.name)
+                    ),
+                    snapshot,
+                    all,
+                ));
+            }
+
+            let maybe_c2_tool = datasets.check_c2_tool(&snapshot.info.name).or_else(|| {
+                Path::new(&snapshot.info.exe)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| datasets.check_c2_tool(name))
+            });
+
+            if let Some(tool) = maybe_c2_tool.filter(|info| has_c2_abused_services(info)) {
+                let abused_services = if tool.abused_services.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    tool.abused_services.join(", ")
+                };
+                events.push(self.make_event(
+                    EventType::LolC2Match,
+                    ThreatLevel::Red,
+                    format!(
+                        "LOLC2 framework match: {} (process={}) | abused services: {} | reference: {}",
+                        tool.name, snapshot.info.name, abused_services, tool.reference_url
                     ),
                     snapshot,
                     all,
@@ -1061,6 +1083,24 @@ fn detect_dangerous_commands_with_context(
         hits.push("wget_raw_ip");
     }
 
+    if is_vscode_tunnel_command(&lower, &lower_process, &lower_exe) {
+        hits.push("vscode_tunnel_agent");
+    }
+
+    if uses_download_tool(&lower) && references_model_hosting_domain(&lower) {
+        hits.push("llm_model_download");
+    }
+
+    if references_google_workspace_api(&lower) && !is_browser_process(&lower_process) {
+        hits.push("cloud_api_c2");
+    }
+
+    if is_temp_path_context(&lower, &lower_working_dir, &lower_exe)
+        && looks_like_installer_abuse(&lower)
+    {
+        hits.push("tempdir_installer_abuse");
+    }
+
     if writes_launchd_paths(&lower) {
         hits.push("launchd_persistence");
     }
@@ -1341,6 +1381,86 @@ fn has_non_rfc1918_ipv4_url(cmdline: &str, tool_name: &str) -> bool {
     })
 }
 
+fn is_vscode_tunnel_command(cmdline: &str, process_name: &str, exe: &str) -> bool {
+    let cmdline_indicators = [
+        "code tunnel",
+        "code-tunnel",
+        "code serve-web",
+        ".vscode-server",
+    ];
+    if cmdline_indicators
+        .iter()
+        .any(|needle| cmdline.contains(needle))
+    {
+        return true;
+    }
+
+    process_name.contains("code-tunnel")
+        || exe.contains("code-tunnel")
+        || ((process_name == "code" || exe.ends_with("/code"))
+            && (cmdline.contains(" tunnel") || cmdline.contains(" serve-web")))
+}
+
+fn uses_download_tool(cmdline: &str) -> bool {
+    ["curl", "wget", "aria2c", "axel"].iter().any(|tool| {
+        cmdline.starts_with(&format!("{tool} ")) || cmdline.contains(&format!(" {tool} "))
+    })
+}
+
+fn references_model_hosting_domain(cmdline: &str) -> bool {
+    [
+        "huggingface.co",
+        "ollama.com",
+        "ollama.ai",
+        "models.ai",
+        "hf-mirror.com",
+        "civitai.com",
+        "together.ai",
+    ]
+    .iter()
+    .any(|domain| cmdline.contains(domain))
+}
+
+fn references_google_workspace_api(cmdline: &str) -> bool {
+    [
+        "sheets.googleapis.com",
+        "drive.googleapis.com",
+        "docs.googleapis.com",
+    ]
+    .iter()
+    .any(|endpoint| cmdline.contains(endpoint))
+}
+
+fn is_browser_process(process_name: &str) -> bool {
+    ["chrome", "firefox", "safari", "edge"]
+        .iter()
+        .any(|browser| process_name.contains(browser))
+}
+
+fn is_temp_path_context(cmdline: &str, working_dir: &str, exe: &str) -> bool {
+    let temp_roots = ["/tmp", "/dev/shm", "/var/tmp", "/run/user", "/private/tmp"];
+    temp_roots.iter().any(|root| {
+        working_dir == *root
+            || working_dir.starts_with(&format!("{root}/"))
+            || exe == *root
+            || exe.starts_with(&format!("{root}/"))
+            || cmdline.contains(&format!("{root}/"))
+    })
+}
+
+fn looks_like_installer_abuse(cmdline: &str) -> bool {
+    cmdline.contains("dpkg ")
+        || cmdline.contains("rpm ")
+        || cmdline.contains("pip install")
+        || cmdline.contains("pip3 install")
+        || cmdline.contains("npm install")
+        || cmdline.contains("cargo install")
+        || cmdline.contains(" install.sh")
+        || cmdline.starts_with("install.sh ")
+        || cmdline.contains("/install.sh")
+        || (cmdline.contains(".sh") && cmdline.contains(" install"))
+}
+
 fn writes_launchd_paths(cmdline: &str) -> bool {
     if !cmdline.contains("/library/launchdaemons/")
         && !cmdline.contains("~/library/launchagents/")
@@ -1582,6 +1702,28 @@ fn lot_tunnels_url(name: &str) -> String {
     )
 }
 
+fn has_c2_abused_services(info: &C2ToolInfo) -> bool {
+    if info.abused_services.is_empty() {
+        return true;
+    }
+
+    info.abused_services.iter().any(|service| {
+        let service = service.to_ascii_lowercase();
+        service.contains("slack")
+            || service.contains("discord")
+            || service.contains("telegram")
+            || service.contains("google")
+            || service.contains("sheet")
+            || service.contains("dns")
+            || service.contains("dropbox")
+            || service.contains("onedrive")
+            || service.contains("github")
+            || service.contains("gmail")
+            || service.contains("web")
+            || service.contains("api")
+    })
+}
+
 /// Returns true when an allow-list entry matches a process name, command token, or executable path.
 pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe: &str) -> bool {
     let needle = entry_name.trim().to_ascii_lowercase();
@@ -1611,17 +1753,17 @@ pub fn allow_list_entry_matches(entry_name: &str, name: &str, cmdline: &str, exe
 mod tests {
     use std::collections::{HashMap, HashSet};
 
+    use super::ProcessCollector;
     use super::ProcessEnrichment;
     use super::ProcessInfo;
     use super::ProcessSnapshot;
-    use super::ProcessCollector;
     use super::detect_dangerous_commands;
     use super::detect_dangerous_commands_with_context;
     use super::detection_is_red;
     use super::jittered_scan_interval;
     use super::scrub_secrets;
     use crate::config::Config;
-    use crate::datasets::{DatasetManager, GtfobinInfo, RmmToolInfo, TunnelToolInfo};
+    use crate::datasets::{C2ToolInfo, DatasetManager, GtfobinInfo, RmmToolInfo, TunnelToolInfo};
     use crate::models::{EventType, SecurityEvent};
     use tokio::sync::broadcast;
 
@@ -1865,6 +2007,114 @@ mod tests {
             detect_dangerous_commands("curl -fsSL http://example.com/a | base64 -d | gunzip", "/")
                 .contains(&"fileless_pipeline_decode")
         );
+    }
+
+    #[test]
+    fn detects_vscode_tunnel_commands_in_ai_agent_trees() {
+        let hits = detect_dangerous_commands_with_context(
+            "code tunnel --accept-server-license-terms --name build-host",
+            "/home/ryan/projects/leash",
+            "code",
+            "codex",
+            "codex run",
+            &["codex".into(), "code".into()],
+            &HashMap::new(),
+            "/usr/bin/code",
+        );
+        assert!(hits.contains(&"vscode_tunnel_agent"));
+
+        let benign = detect_dangerous_commands_with_context(
+            "code .",
+            "/home/ryan/projects/leash",
+            "code",
+            "codex",
+            "codex run",
+            &["codex".into(), "code".into()],
+            &HashMap::new(),
+            "/usr/bin/code",
+        );
+        assert!(!benign.contains(&"vscode_tunnel_agent"));
+    }
+
+    #[test]
+    fn detects_large_model_download_commands() {
+        let hits = detect_dangerous_commands_with_context(
+            "wget https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct/resolve/main/model.gguf",
+            "/home/ryan/projects/leash",
+            "wget",
+            "codex",
+            "codex run",
+            &["codex".into(), "wget".into()],
+            &HashMap::new(),
+            "/usr/bin/wget",
+        );
+        assert!(hits.contains(&"llm_model_download"));
+
+        let benign = detect_dangerous_commands_with_context(
+            "wget https://example.com/small.txt",
+            "/home/ryan/projects/leash",
+            "wget",
+            "codex",
+            "codex run",
+            &["codex".into(), "wget".into()],
+            &HashMap::new(),
+            "/usr/bin/wget",
+        );
+        assert!(!benign.contains(&"llm_model_download"));
+    }
+
+    #[test]
+    fn detects_google_workspace_api_cloud_c2_patterns_for_non_browsers() {
+        let hits = detect_dangerous_commands_with_context(
+            "curl https://sheets.googleapis.com/v4/spreadsheets/abc123/values/A1",
+            "/home/ryan/projects/leash",
+            "curl",
+            "python3",
+            "python3 agent.py",
+            &["codex".into(), "python3".into(), "curl".into()],
+            &HashMap::new(),
+            "/usr/bin/curl",
+        );
+        assert!(hits.contains(&"cloud_api_c2"));
+
+        let benign = detect_dangerous_commands_with_context(
+            "curl https://sheets.googleapis.com/v4/spreadsheets/abc123/values/A1",
+            "/home/ryan/projects/leash",
+            "chrome",
+            "codex",
+            "codex run",
+            &["codex".into(), "chrome".into()],
+            &HashMap::new(),
+            "/usr/bin/chrome",
+        );
+        assert!(!benign.contains(&"cloud_api_c2"));
+    }
+
+    #[test]
+    fn detects_installer_abuse_from_temp_paths() {
+        let hits = detect_dangerous_commands_with_context(
+            "pip install evil-wheel.whl",
+            "/tmp/stage",
+            "pip",
+            "codex",
+            "codex run",
+            &["codex".into(), "pip".into()],
+            &HashMap::new(),
+            "/usr/bin/pip",
+        );
+        assert!(hits.contains(&"tempdir_installer_abuse"));
+
+        let benign = detect_dangerous_commands_with_context(
+            "pip install requests",
+            "/home/ryan/projects/leash",
+            "pip",
+            "codex",
+            "codex run",
+            &["codex".into(), "pip".into()],
+            &HashMap::new(),
+            "/usr/bin/pip",
+        );
+        assert!(!benign.contains(&"tempdir_installer_abuse"));
     }
 
     #[test]
@@ -2328,6 +2578,83 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.event_type == EventType::LotTunnelMatch)
+        );
+    }
+
+    #[test]
+    fn emits_lolc2_match_for_known_c2_framework() {
+        let mut collector = collector();
+        let mut datasets = DatasetManager::default();
+        datasets.c2_tools.insert(
+            "sliver".to_string(),
+            C2ToolInfo {
+                name: "Sliver".to_string(),
+                description: "C2 over legitimate channels".to_string(),
+                abused_services: vec!["discord".to_string(), "slack".to_string()],
+                reference_url: "https://lolc2.github.io/".to_string(),
+            },
+        );
+        collector.datasets = Some(datasets);
+
+        let root = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 100,
+                ppid: 1,
+                name: "codex".to_string(),
+                cmdline: "codex run".to_string(),
+                exe: "/usr/bin/codex".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "codex run".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: true,
+            start_ticks: Some(1),
+        };
+        let child = ProcessSnapshot {
+            info: ProcessInfo {
+                pid: 101,
+                ppid: 100,
+                name: "sliver".to_string(),
+                cmdline: "sliver-server".to_string(),
+                exe: "/usr/bin/sliver-server".to_string(),
+                cwd: "/tmp".to_string(),
+                username: "1000".to_string(),
+                open_files: vec![],
+                parent_chain: vec![],
+                start_time: None,
+            },
+            enrichment: ProcessEnrichment {
+                full_cmdline: "sliver-server".to_string(),
+                working_dir: "/tmp".to_string(),
+                env: HashMap::new(),
+                open_fds: vec![],
+                memory_rss_kb: None,
+                memory_vmsize_kb: None,
+            },
+            is_ai_agent: false,
+            start_ticks: Some(2),
+        };
+
+        let mut all = HashMap::new();
+        all.insert(100, root);
+        all.insert(101, child.clone());
+
+        let ai_roots = HashSet::from([100]);
+        let events = collector.analyze_monitored_process(101, &child, &all, &ai_roots);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::LolC2Match)
         );
     }
 }
