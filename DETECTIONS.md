@@ -37,6 +37,21 @@ The table below documents command-pattern detections emitted by `detect_dangerou
 | `crontab_modification` | T1053.003 | Detects `crontab -e` and write operations targeting `/var/spool/cron/` or `/etc/cron.d/`. | Orange | MITRE ATT&CK T1053.003 (Cron): https://attack.mitre.org/techniques/T1053/003/ | `echo \"* * * * * ...\" > /etc/cron.d/system-update` |
 | `ssh_authorized_keys_modification` | T1098.004 | Detects write operations to `~/.ssh/authorized_keys`. | Red | MITRE ATT&CK T1098.004 (SSH Authorized Keys): https://attack.mitre.org/techniques/T1098/004/ | `echo ssh-rsa AAAA... >> ~/.ssh/authorized_keys` |
 
+## Planned Detections (v0.2)
+
+| Detection name | MITRE ATT&CK ID | Description | Severity | Public source citation | Example trigger |
+|---|---|---|---|---|---|
+| `lolrmm_tool_execution` | T1219 | Detects execution of known abused RMM tools (AnyDesk, SimpleHelp, GoToAssist, ConnectWise, etc.) using the LOLRMM.io dataset. Flags both direct execution and AI-agent-spawned instances. | Red | LOLRMM project (magicsword-io): https://lolrmm.io / https://github.com/magicsword-io/LOLRMM | AI agent spawns `anydesk --service` |
+| `loldriver_load` | T1068 | Detects loading or installation of known vulnerable/malicious kernel drivers using the LOLDrivers.io hash database. Catches BYOVD (Bring Your Own Vulnerable Driver) privilege escalation attempts. | Red | LOLDrivers project (magicsword-io): https://www.loldrivers.io / https://github.com/magicsword-io/LOLDrivers | `insmod ./vuln_driver.sys` with matching SHA256 |
+
+Dataset integration:
+- Both datasets are fetched on `leash init` and cached locally at `~/.config/leash/datasets/`
+- `lolrmm_tools.json` — RMM tool names, paths, process signatures
+- `loldrivers.json` — Vulnerable/malicious driver SHA256 hashes
+- Datasets refresh on `leash update` or when stale (>7 days)
+- Process scans cross-reference against LOLRMM tool names/paths
+- FIM events cross-reference against LOLDrivers hashes
+
 ## Severity model
 
 Leash assigns detection event severity in `ProcessCollector::analyze`:

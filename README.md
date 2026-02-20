@@ -224,6 +224,8 @@ Requirements: Rust 1.75+, Linux (x86_64 or aarch64)
 
 - [x] v0.1 — Core visibility (process, file, network monitoring)
 - [ ] v0.2 — eBPF kernel hooks (zero-overhead monitoring)
+- [ ] v0.2 — LOLRMM integration (flag known abused RMM tools via [lolrmm.io](https://lolrmm.io) dataset)
+- [ ] v0.2 — LOLDrivers integration (detect vulnerable/malicious drivers via [loldrivers.io](https://www.loldrivers.io) dataset)
 - [ ] v0.3 — Anti-tamper watchdog with mutual process monitoring
 - [ ] v0.4 — Web dashboard for historical analysis
 - [ ] v1.0 — macOS support
