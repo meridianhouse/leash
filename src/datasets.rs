@@ -531,10 +531,60 @@ struct RawRmmTool {
 
 #[derive(Debug, Deserialize, Default)]
 struct RawRmmDetails {
-    #[serde(rename = "PEMetadata", default)]
+    #[serde(rename = "PEMetadata", default, deserialize_with = "deserialize_pe_metadata")]
     pe_metadata: Vec<RawPeMetadata>,
-    #[serde(rename = "InstallationPaths", default)]
+    #[serde(rename = "InstallationPaths", default, deserialize_with = "deserialize_nullable_strings")]
     installation_paths: Vec<String>,
+}
+
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(arr) => {
+            Ok(arr.into_iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        }
+        serde_json::Value::String(s) => Ok(vec![s]),
+        serde_json::Value::Null => Ok(Vec::new()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn deserialize_nullable_strings<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Vec<String>>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
+}
+
+fn deserialize_pe_metadata<'de, D>(deserializer: D) -> std::result::Result<Vec<RawPeMetadata>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(arr) => {
+            let mut result = Vec::new();
+            for item in arr {
+                if let Ok(pe) = serde_json::from_value::<RawPeMetadata>(item) {
+                    result.push(pe);
+                }
+            }
+            Ok(result)
+        }
+        serde_json::Value::Object(_) => {
+            match serde_json::from_value::<RawPeMetadata>(value) {
+                Ok(pe) => Ok(vec![pe]),
+                Err(_) => Ok(Vec::new()),
+            }
+        }
+        serde_json::Value::Null => Ok(Vec::new()),
+        _ => Err(de::Error::custom("expected array, object, or null for PEMetadata")),
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -553,7 +603,7 @@ struct RawDriverEntry {
     id: String,
     #[serde(rename = "Category", default)]
     category: String,
-    #[serde(rename = "CVE", default)]
+    #[serde(rename = "CVE", default, deserialize_with = "deserialize_string_or_vec")]
     cve: Vec<String>,
     #[serde(rename = "Tags", default)]
     tags: Vec<String>,
