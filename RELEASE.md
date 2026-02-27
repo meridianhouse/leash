@@ -11,6 +11,7 @@
 - [ ] `leash scan` shows active agents
 - [ ] `leash watch --json` produces valid NDJSON
 - [ ] README/CLI flags match current behavior
+- [ ] Platform support matrix in README matches actual runtime capabilities
 - [ ] `THREAT_MODEL.md` reviewed for current scope
 - [ ] Issue templates present (`.github/ISSUE_TEMPLATE/*`)
 - [ ] Build release artifact + checksum:

@@ -35,10 +35,26 @@ use crate::app::{
 use crate::cli::{AuthCommand, Cli, Commands};
 use crate::config::Config;
 use clap::Parser;
+use std::io::Error as IoError;
+use std::io::ErrorKind;
 
 #[cfg(target_os = "linux")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+fn ensure_linux(feature: &str) -> Result<(), app::DynError> {
+    if cfg!(target_os = "linux") {
+        return Ok(());
+    }
+
+    Err(IoError::new(
+        ErrorKind::Unsupported,
+        format!(
+            "{feature} is currently Linux-only in Leash v0.1/v0.2. Build/install on macOS is supported for evaluation, but runtime telemetry features (watch/start/scan) require Linux.",
+        ),
+    )
+    .into())
+}
 
 fn main() -> Result<(), app::DynError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -57,18 +73,22 @@ async fn async_main() -> Result<(), app::DynError> {
         Commands::Init => init_config(cli.json).await?,
         Commands::Update => update_datasets(cli.config.as_deref(), cli.json).await?,
         Commands::Start => {
+            ensure_linux("start")?;
             let cfg = Config::load(cli.config.as_deref())?;
             run_agent(cfg, false, cli.json, cli.dry_run, cli.ebpf).await?;
         }
         Commands::Watch => {
+            ensure_linux("watch")?;
             let cfg = Config::load(cli.config.as_deref())?;
             run_agent(cfg, true, cli.json, cli.dry_run, cli.ebpf).await?;
         }
         Commands::Test => {
+            ensure_linux("test")?;
             let cfg = Config::load(cli.config.as_deref())?;
             run_test_alerts(cfg, cli.json).await?;
         }
         Commands::Scan => {
+            ensure_linux("scan")?;
             let cfg = Config::load(cli.config.as_deref())?;
             scan::run_scan(cfg, cli.json)?;
         }

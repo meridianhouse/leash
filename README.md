@@ -34,6 +34,17 @@ Leash fixes that.
 - 🚨 **Real-time Alerts** — Slack, Discord, Telegram, or JSON log
 - ⚡ **Single Binary** — Drop it in, run it. No runtime dependencies.
 
+## Platform Support (current)
+
+| Capability | Linux | macOS |
+|---|---|---|
+| Build from source | ✅ | ✅ |
+| Install binary | ✅ | ✅ (evaluation) |
+| `leash init` / config generation | ✅ | ✅ |
+| Runtime telemetry (`watch`, `start`, `scan`, `test`) | ✅ | ⚠️ Not yet supported |
+
+macOS note: Leash can be built/installed for evaluation and workflow integration, but low-level runtime telemetry is currently Linux-only.
+
 ## Quick Start
 
 ### Prerequisites (Linux)
