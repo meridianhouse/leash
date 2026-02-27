@@ -1,13 +1,23 @@
 # Release Checklist
 
-## Pre-Release
+## Pre-Release (Technical Gate)
 
+- [ ] `cargo fmt -- --check`
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] `cargo test --all --quiet`
 - [ ] `cargo build --release` succeeds
 - [ ] Binary stripped (`strip target/release/leash`)
 - [ ] `leash test` generates events on all severity levels
 - [ ] `leash scan` shows active agents
 - [ ] `leash watch --json` produces valid NDJSON
-- [ ] README is up to date with all features
+- [ ] README/CLI flags match current behavior
+- [ ] `THREAT_MODEL.md` reviewed for current scope
+- [ ] Issue templates present (`.github/ISSUE_TEMPLATE/*`)
+- [ ] Build release artifact + checksum:
+      `scripts/release_artifacts.sh vX.Y.Z`
+
+## Pre-Release (Launch Assets)
+
 - [ ] Landing page deployed to meridianhouse.tech/leash
 - [ ] Twitter thread drafted and approved
 - [ ] HN post drafted and approved

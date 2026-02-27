@@ -243,6 +243,7 @@ Leash is **observation-first**. It watches and reports. Response actions (like S
 - Security review 2: detection-rule evasion review
 - Security review 3: alert sink and secrets-handling review
 - Self-integrity monitoring continuously checks binary and config hash drift and raises tamper alerts
+- Threat model: see `THREAT_MODEL.md` for in-scope/out-of-scope + assumptions
 
 ## License
 
