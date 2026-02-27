@@ -1,4 +1,4 @@
-# 🐕 Leash
+# Leash
 
 [![CI](https://img.shields.io/badge/CI-placeholder-lightgrey)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -96,7 +96,7 @@ Notes:
 
 ```
 $ leash watch
-🐕 Leash v0.1.0 — AI Agent Visibility
+Leash v0.1.0 — AI Agent Visibility
 Monitoring: claude, codex, cursor, gptools, aider, cline
 
 🟢 [process_spawn] claude(pid:4521) → bash(pid:4522)
