@@ -1,7 +1,7 @@
 # Leash
 
 <p align="center">
-  <img src="site/leash-logo.png" alt="Leash logo" width="140" />
+  <img src="site/leash-logo-github.png" alt="Leash logo" width="140" />
 </p>
 
 [![CI](https://img.shields.io/badge/CI-placeholder-lightgrey)](#)
