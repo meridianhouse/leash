@@ -14,7 +14,7 @@
     <meta name="twitter:title" content="Leash — Put your AI on a short leash">
     <meta name="twitter:description" content="Open-source AI agent visibility tool. Know what your AI agents are doing on your machine.">
     <meta name="twitter:image" content="https://meridianhouse.tech/leash/og-image.png">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐕</text></svg>">
+    <link rel="icon" href="./leash-logo.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
@@ -168,6 +168,14 @@
         .t-red { color: var(--red); }
         .t-dim { color: var(--text-dim); }
         .t-accent { color: var(--accent); }
+
+        .inline-logo {
+            width: 18px;
+            height: 18px;
+            object-fit: contain;
+            vertical-align: text-bottom;
+            margin-right: 6px;
+        }
 
         /* Features */
         .features {
@@ -323,7 +331,7 @@
             <span class="terminal-title">leash watch</span>
         </div>
         <div class="terminal-body">
-            <div class="t-dim">🐕 Leash v0.1.0 — AI Agent Visibility</div>
+            <div class="t-dim"><img class="inline-logo" src="./leash-logo.png" alt="logo"/>Leash v0.1.0 — AI Agent Visibility</div>
             <div class="t-dim">Monitoring: claude, codex, cursor, aider, cline</div>
             <br>
             <div><span class="t-green">🟢</span> <span class="t-dim">[process_spawn]</span> claude<span class="t-dim">(pid:4521)</span> → bash<span class="t-dim">(pid:4522)</span></div>
