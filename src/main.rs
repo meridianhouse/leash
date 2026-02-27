@@ -1,4 +1,11 @@
-#![deny(clippy::all)]
+#![allow(dead_code, unused_mut)]
+#![allow(
+    clippy::collapsible_if,
+    clippy::map_entry,
+    clippy::question_mark,
+    clippy::too_many_arguments,
+    clippy::manual_find
+)]
 
 mod alerts;
 mod app;

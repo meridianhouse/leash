@@ -1662,7 +1662,7 @@ mod tests {
         let anydesk = manager
             .check_process_name("anydesk")
             .expect("anydesk should be indexed");
-        assert_eq!(anydesk.name, "AnyDesk");
+        assert_eq!(anydesk.name.as_ref(), "AnyDesk");
         assert_eq!(manager.rmm_tool_count(), 1);
     }
 
@@ -1806,8 +1806,8 @@ binaries:
             .iter()
             .find_map(|(key, info)| (key == "ngrok").then_some(info))
             .expect("ngrok key should exist");
-        assert_eq!(info.name, "ngrok");
-        assert!(info.capabilities.iter().any(|cap| cap == "c2"));
+        assert_eq!(info.name.as_ref(), "ngrok");
+        assert!(info.capabilities.iter().any(|cap| cap.as_ref() == "c2"));
     }
 
     #[test]
@@ -1852,14 +1852,14 @@ content
             .iter()
             .find_map(|(key, info)| (key == "sliver-server").then_some(info))
             .expect("sliver-server key should exist");
-        assert_eq!(info.name, "sliver");
+        assert_eq!(info.name.as_ref(), "sliver");
         assert!(
             info.abused_services
                 .iter()
-                .any(|service| service == "discord")
+                .any(|service| service.as_ref() == "discord")
         );
         assert_eq!(
-            info.reference_url,
+            info.reference_url.as_ref(),
             "https://lolc2.github.io/#/tool?id=sliver"
         );
     }
