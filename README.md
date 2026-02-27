@@ -9,6 +9,10 @@
 Leash is an open-source AI agent visibility tool. It monitors what AI agents (Claude Code, Codex, Cursor, GPT, etc.) actually do on your machine — every process spawned, file touched, network connection made, and credential accessed.
 Current footprint: **8,270 lines of Rust** and **212 tests**.
 
+> ⚠️ **Early release disclaimer:** Leash is early-stage software. It is designed to improve visibility and reduce risk, but it is **not foolproof** and should not be treated as a guaranteed prevention layer.
+> 
+> It has not yet been validated against every real-world adversary tradecraft path in live production attack scenarios. Use defense-in-depth and treat Leash as one layer in your security stack.
+
 > You gave an AI agent access to your terminal. Do you know what it's doing?
 
 ## Why Leash?

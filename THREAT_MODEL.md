@@ -3,6 +3,8 @@
 ## What Leash Defends Against
 Leash is an **observability + detection** tool for AI-agent activity on endpoints.
 
+> ⚠️ Early release note: this model reflects intended coverage, not a claim of complete real-world attack validation.
+
 Primary goals:
 - Detect suspicious process chains from AI tools
 - Detect sensitive credential/file access
