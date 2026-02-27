@@ -52,9 +52,12 @@
             text-align: center;
         }
 
-        .hero-emoji {
-            font-size: 64px;
+        .hero-logo {
+            width: 132px;
+            height: 132px;
+            object-fit: contain;
             margin-bottom: 24px;
+            filter: drop-shadow(0 8px 24px rgba(0,0,0,0.45));
         }
 
         h1 {
@@ -299,7 +302,7 @@
 
 <div class="container">
     <section class="hero">
-        <div class="hero-emoji">🐕</div>
+        <img class="hero-logo" src="./leash-logo.png" alt="Leash logo" />
         <h1><span>Leash</span></h1>
         <p class="tagline">Put your AI on a short leash. Know what your AI agents are doing on your machine — every process, file, and network connection.</p>
         <div class="cta-group">
