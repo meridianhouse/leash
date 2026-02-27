@@ -1,5 +1,9 @@
 # Leash
 
+<p align="center">
+  <img src="site/leash-logo.png" alt="Leash logo" width="140" />
+</p>
+
 [![CI](https://img.shields.io/badge/CI-placeholder-lightgrey)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![crates.io](https://img.shields.io/badge/crates.io-placeholder-lightgrey)](#)
