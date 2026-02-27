@@ -17,6 +17,25 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
+# Check build toolchain prerequisites
+if ! command -v cc &> /dev/null && ! command -v gcc &> /dev/null && ! command -v clang &> /dev/null; then
+    echo "A C compiler/linker is required (cc/gcc/clang)."
+    echo "On Ubuntu/Debian: sudo apt-get install -y build-essential"
+    exit 1
+fi
+
+if ! command -v pkg-config &> /dev/null; then
+    echo "pkg-config is required."
+    echo "On Ubuntu/Debian: sudo apt-get install -y pkg-config"
+    exit 1
+fi
+
+if [[ ! -f /usr/include/openssl/ssl.h ]] && [[ ! -f /usr/local/include/openssl/ssl.h ]]; then
+    echo "OpenSSL development headers are required (ssl.h not found)."
+    echo "On Ubuntu/Debian: sudo apt-get install -y libssl-dev"
+    exit 1
+fi
+
 # Check for Linux
 if [[ "$(uname)" != "Linux" ]]; then
     echo "⚠️  Leash currently supports Linux only. macOS support coming in v0.2."

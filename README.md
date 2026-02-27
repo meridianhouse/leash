@@ -32,6 +32,21 @@ Leash fixes that.
 
 ## Quick Start
 
+### Prerequisites (Linux)
+
+- Rust toolchain (`cargo`, `rustc`) via `rustup`
+- C toolchain/linker (`cc`/`gcc`)
+- `pkg-config`
+- OpenSSL development headers (`libssl-dev` on Debian/Ubuntu)
+
+Ubuntu/Debian example:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev
+# then install rustup from https://rustup.rs
+```
+
 ```bash
 # Install from source
 cargo install --path .
