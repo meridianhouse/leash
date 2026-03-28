@@ -31,7 +31,7 @@ blake3 = "1"
 sha3 = "0.10"
 nix = { version = "0.29", features = ["signal", "process"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-rand = "0.9.2"
+rand = "0.10.0"
 aya = "0.13"
 aya-log = "0.2"
 bytes = "1"
