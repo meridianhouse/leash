@@ -24,7 +24,7 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
-procfs = "0.17"
+procfs = "0.18"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip"], default-features = false }
 notify = "6"
 blake3 = "1"
